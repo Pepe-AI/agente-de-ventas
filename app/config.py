@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     twilio_auth_token: SecretStr
     twilio_whatsapp_from: str
 
+    # Redis connection (Render internal URL, set in the dashboard).
+    redis_url: str
+
+    # Concurrency tunables (seconds / counts) with sensible defaults.
+    debounce_window_s: float = 3.0
+    dedup_ttl_s: int = 3600
+    lock_ttl_s: int = 30
+    rate_window_s: int = 10
+    rate_threshold: int = 15
+    block_cooldown_s: int = 600
+    buffer_max: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:

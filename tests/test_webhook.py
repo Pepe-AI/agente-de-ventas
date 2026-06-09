@@ -1,21 +1,45 @@
-"""Tests for the webhook HTTP behavior with a mocked transport channel."""
+"""Tests for the webhook HTTP behavior with mocked transport + fakeredis.
+
+The endpoint now fast-acks: a valid request is buffered and the reply is sent by
+the background flush, not within the request. These tests assert the HTTP
+contract (status codes, no synchronous send); flush behavior is covered in
+test_concurrency.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
 import pytest
+from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 
 from app.channels.twilio import InvalidPayloadError, TwilioField
+from app.concurrency.config import ConcurrencyConfig
 from app.domain.models import IncomingMessage
-from app.main import WEBHOOK_PATH, app, get_channel
+from app.main import (
+    WEBHOOK_PATH,
+    app,
+    get_channel,
+    get_concurrency_config,
+    get_redis,
+)
 
 VALID_FORM = {
     "From": "whatsapp:+5215512345678",
     "Body": "hola",
     "MessageSid": "SM123",
 }
+
+TEST_CONFIG = ConcurrencyConfig(
+    debounce_window_s=60.0,  # long window so the background flush never fires in-test
+    dedup_ttl_s=3600,
+    lock_ttl_s=30,
+    rate_window_s=10,
+    rate_threshold=15,
+    block_cooldown_s=600,
+    buffer_max=10,
+)
 
 
 class FakeChannel:
@@ -46,11 +70,13 @@ class FakeChannel:
 
 def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_channel] = lambda: channel
+    app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
+    app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
     return TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _clear_overrides() -> None:
+def _clear_overrides() -> Iterator[None]:
     yield
     app.dependency_overrides.clear()
 
@@ -65,11 +91,12 @@ def test_invalid_signature_returns_403_and_does_not_send() -> None:
     assert channel.sent == []
 
 
-def test_valid_signature_returns_200_and_echoes() -> None:
+def test_valid_signature_fast_acks_without_sending_synchronously() -> None:
     channel = FakeChannel(signature_valid=True)
     client = _client_with(channel)
 
     response = client.post(WEBHOOK_PATH, data=VALID_FORM)
 
+    # Fast-ack: 200 returns immediately; the reply is the background flush's job.
     assert response.status_code == 200
-    assert channel.sent == [("whatsapp:+5215512345678", "Echo: hola")]
+    assert channel.sent == []
