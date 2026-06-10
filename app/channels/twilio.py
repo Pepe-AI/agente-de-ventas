@@ -14,7 +14,7 @@ from anyio import to_thread
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
-from app.domain.models import IncomingMessage
+from app.domain.models import IncomingMessage, Referral
 
 
 class TwilioField(StrEnum):
@@ -23,6 +23,19 @@ class TwilioField(StrEnum):
     FROM = "From"
     BODY = "Body"
     MESSAGE_SID = "MessageSid"
+
+
+class TwilioReferralField(StrEnum):
+    """Field names for Click-to-WhatsApp ad referral metadata.
+
+    ``SOURCE_ID`` is the presence indicator: it is set only when the message
+    originated from a CTWA ad.
+    """
+
+    SOURCE_ID = "ReferralSourceId"
+    HEADLINE = "ReferralHeadline"
+    BODY = "ReferralBody"
+    CTWA_CLID = "ReferralCtwaClid"
 
 
 class InvalidPayloadError(ValueError):
@@ -56,9 +69,27 @@ class TwilioChannel:
                 sender=form[TwilioField.FROM],
                 text=form[TwilioField.BODY],
                 message_id=form[TwilioField.MESSAGE_SID],
+                referral=self._parse_referral(form),
             )
         except KeyError as exc:
             raise InvalidPayloadError(f"missing field: {exc.args[0]}") from exc
+
+    @staticmethod
+    def _parse_referral(form: Mapping[str, str]) -> Referral | None:
+        """Build a :class:`Referral` from a CTWA ad payload, or ``None``.
+
+        ``ReferralSourceId`` is the presence indicator; the other fields default
+        to empty strings when Twilio omits them.
+        """
+        source_id = form.get(TwilioReferralField.SOURCE_ID)
+        if source_id is None:
+            return None
+        return Referral(
+            source_id=source_id,
+            headline=form.get(TwilioReferralField.HEADLINE, ""),
+            body=form.get(TwilioReferralField.BODY, ""),
+            ctwa_clid=form.get(TwilioReferralField.CTWA_CLID, ""),
+        )
 
     async def send(self, to: str, text: str) -> None:
         """Send a WhatsApp text via the Twilio REST API (off the event loop)."""
