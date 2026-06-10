@@ -20,6 +20,7 @@ class KeyPrefix(StrEnum):
     BUFFER = "buffer"
     DEBOUNCE = "debounce"
     LOCK = "lock"
+    HANDOFF = "handoff"
 
 
 def make_key(prefix: KeyPrefix, identifier: str) -> str:

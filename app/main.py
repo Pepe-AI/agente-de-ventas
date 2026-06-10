@@ -18,10 +18,11 @@ from twilio.rest import Client
 
 from app.channels.base import Channel
 from app.channels.twilio import InvalidPayloadError, TwilioChannel
-from app.concurrency import buffer, debounce, dedup, rate_limit
+from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
+from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
 
 structlog.configure(
@@ -119,6 +120,12 @@ async def whatsapp_webhook(
     # 2. Idempotency: a repeated MessageSid is a retry/duplicate.
     if await dedup.is_duplicate(redis, msg.message_id, config.dedup_ttl_s):
         log.info("duplicate_discard", message_id=msg.message_id)
+        return _ack()
+
+    # 2b. Human handoff: bot stays silent; relay to the human and ack only.
+    if await handoff.is_handed_off(redis, sender):
+        await relay_to_human(msg)
+        log.info("handoff_relay", sender=sender)
         return _ack()
 
     # 3. Flood: rate-limit and block on threshold.
