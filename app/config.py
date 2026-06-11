@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # Redis connection (Render internal URL, set in the dashboard).
     redis_url: str
 
+    # LLM (Gemini) configuration.
+    gemini_api_key: SecretStr
+    llm_model: str = "gemini-3.5-flash"
+
     # Concurrency tunables (seconds / counts) with sensible defaults.
     debounce_window_s: float = 3.0
     dedup_ttl_s: int = 3600

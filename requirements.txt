@@ -6,6 +6,7 @@ twilio>=9.4
 python-multipart>=0.0.20
 anyio>=4.4
 redis>=5.0
+google-genai>=1.0
 
 # dev
 pytest>=8.3

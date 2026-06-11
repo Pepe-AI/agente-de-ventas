@@ -24,6 +24,8 @@ from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
 from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
+from app.llm.base import LLM
+from app.llm.gemini import build_gemini_llm
 
 structlog.configure(
     processors=[
@@ -60,6 +62,16 @@ def get_redis() -> Redis:
     return from_url(get_settings().redis_url, decode_responses=True)
 
 
+@lru_cache
+def get_llm() -> LLM:
+    """Build the Gemini LLM adapter once (composition root)."""
+    settings = get_settings()
+    return build_gemini_llm(
+        api_key=settings.gemini_api_key.get_secret_value(),
+        model=settings.llm_model,
+    )
+
+
 def get_concurrency_config() -> ConcurrencyConfig:
     """Expose the concurrency tunables derived from settings."""
     return ConcurrencyConfig.from_settings(get_settings())
@@ -92,6 +104,7 @@ async def whatsapp_webhook(
     request: Request,
     channel: Annotated[Channel, Depends(get_channel)],
     redis: Annotated[Redis, Depends(get_redis)],
+    llm: Annotated[LLM, Depends(get_llm)],
     config: Annotated[ConcurrencyConfig, Depends(get_concurrency_config)],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
@@ -144,7 +157,7 @@ async def whatsapp_webhook(
 
     # 5. Register debounce token and schedule the background flush.
     await debounce.set_token(redis, sender, msg.message_id)
-    schedule_flush(redis, channel, sender, msg.message_id, config)
+    schedule_flush(redis, channel, llm, sender, msg.message_id, config)
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)
     return _ack()

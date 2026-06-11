@@ -52,6 +52,8 @@ native Python — there is no Docker or local Redis setup.
 | `TWILIO_AUTH_TOKEN` | yes | — | Twilio auth token (used for signature validation) |
 | `TWILIO_WHATSAPP_FROM` | yes | — | WhatsApp sender, e.g. `whatsapp:+14155238886` |
 | `REDIS_URL` | yes | — | Redis connection URL (Render internal URL) |
+| `GEMINI_API_KEY` | yes | — | Google Gemini API key (LLM) |
+| `LLM_MODEL` | no | `gemini-3.5-flash` | Gemini model id |
 | `DEBOUNCE_WINDOW_S` | no | `3` | Debounce window before a flush fires |
 | `DEDUP_TTL_S` | no | `3600` | Idempotency key TTL |
 | `LOCK_TTL_S` | no | `30` | Per-conversation lock TTL |
@@ -120,8 +122,16 @@ app/
     lock.py            # per-conversation lock (acquire / owner-safe release)
     config.py          # ConcurrencyConfig
     flush.py           # background flush + scheduling
+  crm/
+    relay.py           # relay-to-human seam (stub; Kommo Chats API in inc 8)
+  llm/
+    base.py            # LLM port (Protocol, structured output)
+    gemini.py          # GeminiLLM adapter (google-genai native structured output)
+  understanding/
+    schemas.py         # response schemas (dummy placeholder for inc 3)
+    engine.py          # understand_turn — filled/missing slots + question
   domain/
-    models.py          # IncomingMessage (neutral domain model)
-    orchestrator.py    # handle_message — the conversational-logic seam (echo)
+    models.py          # IncomingMessage + Referral (neutral domain model)
+    orchestrator.py    # handle_message — runs the understanding engine
 tests/
 ```

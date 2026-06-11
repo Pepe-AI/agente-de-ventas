@@ -19,8 +19,10 @@ from app.main import (
     app,
     get_channel,
     get_concurrency_config,
+    get_llm,
     get_redis,
 )
+from app.understanding.schemas import DummyReservation
 
 SENDER = "whatsapp:+5215512345678"
 VALID_FORM = {"From": SENDER, "Body": "hola", "MessageSid": "SM123"}
@@ -59,6 +61,13 @@ async def test_clear_handoff_returns_to_bot() -> None:
 # --- Endpoint short-circuit -----------------------------------------------
 
 
+class StubLLM:
+    async def complete_structured(
+        self, prompt: str, schema: type[DummyReservation]
+    ) -> DummyReservation:
+        return DummyReservation()
+
+
 class FakeChannel:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
@@ -85,6 +94,7 @@ class FakeChannel:
 def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_channel] = lambda: channel
     app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
+    app.dependency_overrides[get_llm] = lambda: StubLLM()
     app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
     return TestClient(app)
 

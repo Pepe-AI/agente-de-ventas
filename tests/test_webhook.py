@@ -22,8 +22,10 @@ from app.main import (
     app,
     get_channel,
     get_concurrency_config,
+    get_llm,
     get_redis,
 )
+from app.understanding.schemas import DummyReservation
 
 VALID_FORM = {
     "From": "whatsapp:+5215512345678",
@@ -40,6 +42,15 @@ TEST_CONFIG = ConcurrencyConfig(
     block_cooldown_s=600,
     buffer_max=10,
 )
+
+
+class StubLLM:
+    """Never invoked in these tests (the flush does not run); satisfies get_llm."""
+
+    async def complete_structured(
+        self, prompt: str, schema: type[DummyReservation]
+    ) -> DummyReservation:
+        return DummyReservation()
 
 
 class FakeChannel:
@@ -71,6 +82,7 @@ class FakeChannel:
 def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_channel] = lambda: channel
     app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
+    app.dependency_overrides[get_llm] = lambda: StubLLM()
     app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
     return TestClient(app)
 

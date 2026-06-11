@@ -1,39 +1,36 @@
-"""Tests for the domain orchestration seam (handle_message)."""
+"""Tests for the domain orchestration seam (handle_message) with a mocked LLM."""
 
 from __future__ import annotations
 
-from app.domain.models import IncomingMessage, Referral
+from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
+from app.understanding.schemas import DummyReservation
 
 
-def test_handle_message_plain_echo_without_referral() -> None:
-    msg = IncomingMessage(sender="whatsapp:+1", text="hola", message_id="SM1")
+class FakeLLM:
+    def __init__(self, result: DummyReservation) -> None:
+        self._result = result
 
-    assert handle_message(msg) == "Echo: hola"
+    async def complete_structured(
+        self, prompt: str, schema: type[DummyReservation]
+    ) -> DummyReservation:
+        return self._result
 
 
-def test_handle_message_includes_campaign_headline() -> None:
+async def test_handle_message_reports_understanding() -> None:
+    llm = FakeLLM(
+        DummyReservation(
+            num_people=2, travel_date=None, has_id=None, question="¿hay wifi?"
+        )
+    )
     msg = IncomingMessage(
-        sender="whatsapp:+1",
-        text="hola",
-        message_id="SM1",
-        referral=Referral(
-            source_id="ad-987",
-            headline="Crucero Mediterráneo",
-            body="7 noches",
-            ctwa_clid="ctwa-1",
-        ),
+        sender="whatsapp:+1", text="somos 2, ¿hay wifi?", message_id="SM1"
     )
 
-    assert handle_message(msg) == "Echo: hola [campaña: Crucero Mediterráneo]"
+    reply = await handle_message(msg, llm)
 
-
-def test_handle_message_falls_back_to_source_id_without_headline() -> None:
-    msg = IncomingMessage(
-        sender="whatsapp:+1",
-        text="hola",
-        message_id="SM1",
-        referral=Referral(source_id="ad-987", headline="", body="", ctwa_clid=""),
+    assert reply == (
+        "Entendí: {'num_people': 2}. "
+        "Falta: ['travel_date', 'has_id']. "
+        "Pregunta: ¿hay wifi?"
     )
-
-    assert handle_message(msg) == "Echo: hola [campaña: ad-987]"
