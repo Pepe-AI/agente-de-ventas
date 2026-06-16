@@ -87,6 +87,8 @@ async def _seed(
     slots: dict[str, object],
     last_asked: str,
     asked: set[str] | None = None,
+    attempts: dict[str, int] | None = None,
+    pending: set[str] | None = None,
 ) -> None:
     state = ConversationState(
         trip_type=trip,
@@ -94,6 +96,8 @@ async def _seed(
         phase=Phase.COLLECTING,
         last_asked=last_asked,
         asked=asked if asked is not None else set(),
+        attempts=attempts if attempts is not None else {},
+        pending=pending if pending is not None else set(),
     )
     await save_state(redis, SENDER, state)
 
@@ -414,3 +418,157 @@ async def test_bot_is_silent_after_handoff() -> None:
     )
 
     assert await is_handed_off(redis, SENDER)
+
+
+# --- Retry counter / stuck (4a-extra-2) ------------------------------------
+
+
+async def _seed_only_budget_left(
+    redis: FakeAsyncRedis, attempts: dict[str, int] | None = None
+) -> None:
+    """Seed a state where the only askable thing left is the budget required."""
+    await _seed(
+        redis,
+        TripType.CRUISE,
+        dict(_REQUIRED_NO_BUDGET),
+        last_asked="presupuesto_crucero",
+        asked=_askable_optionals(TripType.CRUISE),
+        attempts=attempts,
+    )
+
+
+async def test_three_unusable_answers_mark_pending_and_hand_off_atorado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relay = AsyncMock()
+    monkeypatch.setattr(orch, "relay_to_human", relay)
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_only_budget_left(redis)
+    descriptor = descriptor_for(TripType.CRUISE)
+    llm = ScriptedLLM({}, {}, {})  # three genuinely unusable turns
+
+    await handle_message(_msg("no sé"), llm, redis, descriptor)
+    await handle_message(_msg("mmm"), llm, redis, descriptor)
+    reply = await handle_message(_msg("ni idea"), llm, redis, descriptor)
+
+    # 3rd failure -> slot given up on -> stuck handoff carrying the pending slot.
+    assert reply == orch._FAREWELL_BY_REASON[HandoffReason.STUCK]
+    assert await is_handed_off(redis, SENDER)
+    event = relay.await_args.args[1]
+    assert event.reason is HandoffReason.STUCK
+    assert "presupuesto_crucero" in event.pending
+    assert event.slots["nombre_cliente"] == "Ana"
+
+
+async def test_attempts_persist_between_turns() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_only_budget_left(redis)
+    descriptor = descriptor_for(TripType.CRUISE)
+    llm = ScriptedLLM({}, {})
+
+    await handle_message(_msg("no sé"), llm, redis, descriptor)
+    await handle_message(_msg("mmm"), llm, redis, descriptor)
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    assert state.attempts["presupuesto_crucero"] == 2
+    assert "presupuesto_crucero" not in state.pending
+
+
+async def test_question_digression_does_not_count_attempt() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_only_budget_left(redis)
+    llm = ScriptedLLM({"question": "¿aceptan tarjeta de crédito?"})
+
+    reply = await handle_message(
+        _msg("¿aceptan tarjeta?"), llm, redis, descriptor_for(TripType.CRUISE)
+    )
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    assert state.attempts == {}  # a question is not a failed attempt
+    assert not await is_handed_off(redis, SENDER)
+    # Asked again literally (no failed attempt -> no reformulation).
+    assert reply == _prompt_of(TripType.CRUISE, "presupuesto_crucero")
+
+
+async def test_out_of_order_data_does_not_count_attempt() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_only_budget_left(redis)
+    # Asked budget; the user answers with a different slot instead.
+    llm = ScriptedLLM({"pasaporte_crucero": "vigente"})
+
+    await handle_message(
+        _msg("sí tengo pasaporte"), llm, redis, descriptor_for(TripType.CRUISE)
+    )
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    assert state.attempts == {}  # data for another slot is not a failed attempt
+
+
+async def test_valid_value_after_failure_satisfies_without_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relay = AsyncMock()
+    monkeypatch.setattr(orch, "relay_to_human", relay)
+    redis = FakeAsyncRedis(decode_responses=True)
+    # Two prior failures already recorded for budget.
+    await _seed_only_budget_left(redis, attempts={"presupuesto_crucero": 2})
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2500 USD")})
+
+    reply = await handle_message(
+        _msg("unos 2500"), llm, redis, descriptor_for(TripType.CRUISE)
+    )
+
+    # The value lands -> satisfied -> complete, never pending.
+    assert reply == FAREWELL
+    event = relay.await_args.args[1]
+    assert event.reason is HandoffReason.COMPLETE
+    assert event.pending == ()
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    assert state.pending == set()
+
+
+async def test_reask_after_failure_is_reformulated_not_literal() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_only_budget_left(redis)
+    llm = ScriptedLLM({})  # one unusable turn
+
+    reply = await handle_message(
+        _msg("no sé"), llm, redis, descriptor_for(TripType.CRUISE)
+    )
+
+    literal = _prompt_of(TripType.CRUISE, "presupuesto_crucero")
+    assert reply != literal  # a retry never repeats the question literally
+    assert literal in reply  # but still asks for the same thing
+
+
+# --- pidió_humano (immediate) ----------------------------------------------
+
+
+async def test_wants_human_hands_off_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relay = AsyncMock()
+    monkeypatch.setattr(orch, "relay_to_human", relay)
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed(
+        redis,
+        TripType.CRUISE,
+        {"nombre_cliente": "Ana", "ruta_crucero": "Caribe"},
+        last_asked="fechas_crucero",
+    )
+    llm = ScriptedLLM({"wants_human": True})
+
+    reply = await handle_message(
+        _msg("mejor quiero hablar con una persona"),
+        llm,
+        redis,
+        descriptor_for(TripType.CRUISE),
+    )
+
+    assert reply == orch._FAREWELL_BY_REASON[HandoffReason.HUMAN_REQUESTED]
+    assert await is_handed_off(redis, SENDER)
+    event = relay.await_args.args[1]
+    assert event.reason is HandoffReason.HUMAN_REQUESTED
+    # Carries what was captured so far.
+    assert event.slots["nombre_cliente"] == "Ana"
+    assert event.slots["ruta_crucero"] == "Caribe"

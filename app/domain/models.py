@@ -11,18 +11,17 @@ from enum import StrEnum
 
 
 class HandoffReason(StrEnum):
-    """Why a conversation was handed to a human.
+    """Why a conversation was handed to a human."""
 
-    Only the happy-path reason exists today; retry/stuck/human-requested reasons
-    arrive in later increments.
-    """
-
-    COMPLETE = "completa"
+    COMPLETE = "completa"  # all required slots captured
+    STUCK = "atorado"  # gave up on a required slot after repeated failures
+    HUMAN_REQUESTED = "pidió_humano"  # the user asked to talk to a person
 
 
 @dataclass(frozen=True, slots=True)
 class HandoffEvent:
-    """The payload of a handoff: why, which schema, and what was captured.
+    """The payload of a handoff: why, which schema, what was captured, and which
+    required slots are still missing (for the human to follow up on a stuck one).
 
     Increment 8 maps this to a CRM funnel; for now it is passed to the relay
     stub. ``trip_type`` is the trip-type value (kept primitive to keep this
@@ -32,6 +31,7 @@ class HandoffEvent:
     reason: HandoffReason
     trip_type: str
     slots: dict[str, object]
+    pending: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

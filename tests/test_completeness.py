@@ -136,13 +136,15 @@ def test_next_required_ignores_optional_slots() -> None:
     assert next_required_slot(descriptor, state) is None
 
 
-# --- next_slot_to_ask (requireds + askable optionals) ----------------------
+# --- next_slot_to_ask (requireds + askable optionals, skipping pending) ----
+
+_NO_PENDING: set[str] = set()
 
 
 def test_next_to_ask_starts_with_first_required() -> None:
     descriptor = descriptor_for(TripType.CRUISE)
 
-    nxt = next_slot_to_ask(descriptor, {}, set())
+    nxt = next_slot_to_ask(descriptor, {}, set(), _NO_PENDING)
 
     assert nxt is not None
     assert nxt.name == "nombre_cliente"
@@ -152,7 +154,7 @@ def test_next_to_ask_returns_optionals_after_requireds_satisfied() -> None:
     # Completion must wait for optionals: requireds done is not enough.
     descriptor = descriptor_for(TripType.CRUISE)
 
-    nxt = next_slot_to_ask(descriptor, _CRUISE_REQUIRED_SATISFIED, set())
+    nxt = next_slot_to_ask(descriptor, _CRUISE_REQUIRED_SATISFIED, set(), _NO_PENDING)
 
     assert nxt is not None
     assert nxt.name == "cabinas_crucero"
@@ -162,7 +164,7 @@ def test_next_to_ask_skips_already_asked_optional() -> None:
     descriptor = descriptor_for(TripType.CRUISE)
 
     nxt = next_slot_to_ask(
-        descriptor, _CRUISE_REQUIRED_SATISFIED, {"cabinas_crucero"}
+        descriptor, _CRUISE_REQUIRED_SATISFIED, {"cabinas_crucero"}, _NO_PENDING
     )
 
     assert nxt is not None
@@ -174,7 +176,7 @@ def test_next_to_ask_skips_optional_already_satisfied_out_of_order() -> None:
     descriptor = descriptor_for(TripType.CRUISE)
     state = {**_CRUISE_REQUIRED_SATISFIED, "cabinas_crucero": "1 balcón"}
 
-    nxt = next_slot_to_ask(descriptor, state, set())
+    nxt = next_slot_to_ask(descriptor, state, set(), _NO_PENDING)
 
     assert nxt is not None
     assert nxt.name == "tipo_cabina"
@@ -184,21 +186,38 @@ def test_next_to_ask_never_returns_non_askable_experience() -> None:
     descriptor = descriptor_for(TripType.EUROPE)
     state = {"nombre_cliente": "Ana", "paises_europa": "Italia"}
 
-    nxt = next_slot_to_ask(descriptor, state, set())
+    nxt = next_slot_to_ask(descriptor, state, set(), _NO_PENDING)
 
     assert nxt is not None
     assert nxt.name != "experiencia_europa"
     assert nxt.name == "servicios_europa"
 
 
-def test_next_to_ask_none_when_requireds_done_and_optionals_asked() -> None:
+def test_next_to_ask_skips_pending_required() -> None:
+    # A required slot given up on (pending) is treated as resolved: skip it.
+    descriptor = descriptor_for(TripType.CRUISE)
+    state = {"nombre_cliente": "Ana"}  # ruta_crucero unsatisfied but pending
+
+    nxt = next_slot_to_ask(descriptor, state, set(), {"ruta_crucero"})
+
+    assert nxt is not None
+    assert nxt.name == "fechas_crucero"
+
+
+def test_next_to_ask_none_when_requireds_done_or_pending_and_optionals_asked() -> None:
     descriptor = descriptor_for(TripType.CRUISE)
     askable_optionals = {
         s.name for s in descriptor.slots if s.askable and not s.required
     }
+    # presupuesto unsatisfied but pending; everything else satisfied/asked.
+    state = {
+        k: v
+        for k, v in _CRUISE_REQUIRED_SATISFIED.items()
+        if k != "presupuesto_crucero"
+    }
 
     nxt = next_slot_to_ask(
-        descriptor, _CRUISE_REQUIRED_SATISFIED, askable_optionals
+        descriptor, state, askable_optionals, {"presupuesto_crucero"}
     )
 
     assert nxt is None

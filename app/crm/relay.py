@@ -29,4 +29,6 @@ async def relay_to_human(
         fields["reason"] = event.reason.value
         fields["trip_type"] = event.trip_type
         fields["slots"] = event.slots
+        if event.pending:
+            fields["pending"] = list(event.pending)
     log.info("would relay to human", **fields)

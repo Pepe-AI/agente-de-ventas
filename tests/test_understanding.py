@@ -86,3 +86,21 @@ async def test_context_known_state_is_passed_to_the_model() -> None:
     await understand_turn(llm, _Mini, "texto", context)
 
     assert "Ana" in llm.prompts[0]
+
+
+async def test_detects_wants_human() -> None:
+    llm = FakeLLM(a=None, b=None, wants_human=True)
+
+    result = await understand_turn(
+        llm, _Mini, "quiero hablar con una persona", _NO_CONTEXT
+    )
+
+    assert result.wants_human is True
+
+
+async def test_wants_human_defaults_false_when_absent() -> None:
+    llm = FakeLLM(a=1, b=None, question=None)
+
+    result = await understand_turn(llm, _Mini, "texto", _NO_CONTEXT)
+
+    assert result.wants_human is False

@@ -24,6 +24,7 @@ from pydantic import BaseModel, create_model
 from app.llm.base import LLM
 
 QUESTION_FIELD = "question"
+WANTS_HUMAN_FIELD = "wants_human"
 
 _INSTRUCTIONS = (
     "Eres un extractor de información para reservas de viaje. A partir del "
@@ -32,7 +33,9 @@ _INSTRUCTIONS = (
     "adivines ni inventes valores. Usa el contexto para resolver respuestas "
     "breves o ambiguas (p. ej. un número suelto que responde a la última "
     "pregunta). Si el usuario hace una pregunta, cópiala textual en el campo "
-    f"'{QUESTION_FIELD}'; si no hay pregunta, déjalo en null."
+    f"'{QUESTION_FIELD}'; si no hay pregunta, déjalo en null. Si el usuario "
+    "pide explícitamente hablar con una persona, asesor o humano, marca "
+    f"'{WANTS_HUMAN_FIELD}' en true; en caso contrario, false."
 )
 
 
@@ -51,23 +54,27 @@ class TurnContext:
 
 @dataclass(frozen=True, slots=True)
 class Understanding:
-    """The engine's read of one turn: what it filled and any user question."""
+    """The engine's read of one turn: filled slots, any question, and whether
+    the user asked to talk to a human."""
 
     filled: dict[str, object]
     question: str | None
+    wants_human: bool
 
 
 @cache
-def _compose_with_question(model: type[BaseModel]) -> type[BaseModel]:
-    """Derive ``model`` + a ``question`` field (cached per pure model).
+def _compose_with_meta(model: type[BaseModel]) -> type[BaseModel]:
+    """Derive ``model`` + the engine's meta fields (cached per pure model).
 
-    The literal keyword must stay in sync with ``QUESTION_FIELD`` (used below to
-    strip the question back out); a drift would surface as a failing test.
+    The literal keywords must stay in sync with ``QUESTION_FIELD`` /
+    ``WANTS_HUMAN_FIELD`` (used below to strip them back out); a drift would
+    surface as a failing test.
     """
     return create_model(
-        f"{model.__name__}WithQuestion",
+        f"{model.__name__}WithMeta",
         __base__=model,
         question=(str | None, None),
+        wants_human=(bool | None, None),
     )
 
 
@@ -99,15 +106,16 @@ async def understand_turn(
 ) -> Understanding:
     """Extract filled slots and any question from a turn.
 
-    ``extraction_model`` is the pure business model (no ``question`` field); the
-    engine composes ``question`` onto it before calling the model. A slot left
-    null by the model is simply absent from ``filled`` (never invented).
+    ``extraction_model`` is the pure business model (no meta fields); the engine
+    composes ``question`` and ``wants_human`` onto it before calling the model. A
+    slot left null by the model is simply absent from ``filled`` (never invented).
     """
-    composed = _compose_with_question(extraction_model)
+    composed = _compose_with_meta(extraction_model)
     result = await llm.complete_structured(_build_prompt(text, context), composed)
     data = result.model_dump()
 
     question = data.pop(QUESTION_FIELD, None)
+    wants_human = bool(data.pop(WANTS_HUMAN_FIELD, None))
     filled = {key: value for key, value in data.items() if value is not None}
 
-    return Understanding(filled=filled, question=question)
+    return Understanding(filled=filled, question=question, wants_human=wants_human)

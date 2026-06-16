@@ -145,6 +145,49 @@ async def test_load_tolerates_state_without_asked_key() -> None:
     assert state.slots == {"nombre_cliente": "Ana"}
 
 
+async def test_attempts_and_pending_default_empty() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert state.attempts == {}
+    assert state.pending == set()
+
+
+async def test_attempts_and_pending_persist_round_trip() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    state.attempts = {"presupuesto_crucero": 2}
+    state.pending = {"fechas_crucero"}
+
+    await save_state(redis, SENDER, state)
+    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert reloaded.attempts == {"presupuesto_crucero": 2}
+    assert reloaded.pending == {"fechas_crucero"}
+
+
+async def test_load_tolerates_state_without_attempts_or_pending() -> None:
+    # A state persisted by 4a-extra-1 (before attempts/pending) loads cleanly.
+    redis = FakeAsyncRedis(decode_responses=True)
+    legacy = json.dumps(
+        {
+            "trip_type": "cruise",
+            "slots": {},
+            "phase": "collecting",
+            "last_asked": None,
+            "asked": ["nombre_cliente"],
+        }
+    )
+    await redis.set(make_key(KeyPrefix.STATE, SENDER), legacy)
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert state.attempts == {}
+    assert state.pending == set()
+    assert state.asked == {"nombre_cliente"}
+
+
 async def test_stored_trip_type_wins_over_default() -> None:
     # Once a conversation started on a schema, a different default must not switch it.
     redis = FakeAsyncRedis(decode_responses=True)

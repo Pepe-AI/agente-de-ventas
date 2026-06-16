@@ -34,6 +34,14 @@ def _empty_asked() -> set[str]:
     return set()
 
 
+def _empty_attempts() -> dict[str, int]:
+    return {}
+
+
+def _empty_pending() -> set[str]:
+    return set()
+
+
 @dataclass(slots=True)
 class ConversationState:
     """Mutable per-turn working state for one sender."""
@@ -45,6 +53,11 @@ class ConversationState:
     # Slots already asked (so optionals are not asked twice). Persisted as a
     # list in JSON since sets are not JSON-serializable.
     asked: set[str] = field(default_factory=_empty_asked)
+    # Failed-attempt counts per required slot (unusable answers only).
+    attempts: dict[str, int] = field(default_factory=_empty_attempts)
+    # Required slots given up on after too many failed attempts (persisted as a
+    # list, like ``asked``).
+    pending: set[str] = field(default_factory=_empty_pending)
 
 
 def merge_slots(
@@ -96,8 +109,11 @@ async def load_state(
         slots=data["slots"],
         phase=Phase(data["phase"]),
         last_asked=data["last_asked"],
-        # Tolerate states persisted before `asked` existed (4a-core).
+        # Tolerate states persisted before these fields existed (4a-core /
+        # 4a-extra-1).
         asked=set(data.get("asked", [])),
+        attempts=data.get("attempts", {}),
+        pending=set(data.get("pending", [])),
     )
 
 
@@ -110,6 +126,8 @@ async def save_state(redis: Redis, sender: str, state: ConversationState) -> Non
             "phase": state.phase.value,
             "last_asked": state.last_asked,
             "asked": sorted(state.asked),
+            "attempts": state.attempts,
+            "pending": sorted(state.pending),
         }
     )
     await redis.set(_key(sender), payload)
