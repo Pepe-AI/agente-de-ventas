@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 import app.main as main_module
 from app.channels.twilio import InvalidPayloadError, TwilioField
@@ -19,10 +20,11 @@ from app.main import (
     app,
     get_channel,
     get_concurrency_config,
+    get_descriptor,
     get_llm,
     get_redis,
 )
-from app.understanding.schemas import DummyReservation
+from app.understanding.schemas import TripType, descriptor_for
 
 SENDER = "whatsapp:+5215512345678"
 VALID_FORM = {"From": SENDER, "Body": "hola", "MessageSid": "SM123"}
@@ -63,9 +65,9 @@ async def test_clear_handoff_returns_to_bot() -> None:
 
 class StubLLM:
     async def complete_structured(
-        self, prompt: str, schema: type[DummyReservation]
-    ) -> DummyReservation:
-        return DummyReservation()
+        self, prompt: str, schema: type[BaseModel]
+    ) -> BaseModel:
+        return schema()
 
 
 class FakeChannel:
@@ -96,6 +98,7 @@ def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
     app.dependency_overrides[get_llm] = lambda: StubLLM()
     app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
+    app.dependency_overrides[get_descriptor] = lambda: descriptor_for(TripType.CRUISE)
     return TestClient(app)
 
 

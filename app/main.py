@@ -26,6 +26,7 @@ from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
 from app.llm.base import LLM
 from app.llm.gemini import build_gemini_llm
+from app.understanding.schemas import TripSchema, descriptor_for
 
 structlog.configure(
     processors=[
@@ -77,6 +78,11 @@ def get_concurrency_config() -> ConcurrencyConfig:
     return ConcurrencyConfig.from_settings(get_settings())
 
 
+def get_descriptor() -> TripSchema:
+    """Select the trip schema a new conversation starts on (composition root)."""
+    return descriptor_for(get_settings().trip_type)
+
+
 def build_public_url(request: Request) -> str:
     """Reconstruct the public URL Twilio used to sign the request.
 
@@ -106,6 +112,7 @@ async def whatsapp_webhook(
     redis: Annotated[Redis, Depends(get_redis)],
     llm: Annotated[LLM, Depends(get_llm)],
     config: Annotated[ConcurrencyConfig, Depends(get_concurrency_config)],
+    descriptor: Annotated[TripSchema, Depends(get_descriptor)],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
     # Twilio posts urlencoded fields; keep only str values (drop any uploads).
@@ -157,7 +164,7 @@ async def whatsapp_webhook(
 
     # 5. Register debounce token and schedule the background flush.
     await debounce.set_token(redis, sender, msg.message_id)
-    schedule_flush(redis, channel, llm, sender, msg.message_id, config)
+    schedule_flush(redis, channel, llm, descriptor, sender, msg.message_id, config)
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)
     return _ack()

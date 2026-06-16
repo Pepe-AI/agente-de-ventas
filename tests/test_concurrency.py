@@ -1,8 +1,8 @@
 """Concurrency-layer tests with fakeredis (dedupe, debounce, flood, lock).
 
-handle_message now runs the understanding engine, so these tests inject a
-FakeLLM and assert on send count + the text that reached the engine, not on a
-fixed echo string.
+handle_message now runs the orchestrator, so these tests inject a FakeLLM and
+assert on send count + the text that reached the engine, not on a fixed echo
+string.
 """
 
 from __future__ import annotations
@@ -11,13 +11,15 @@ import asyncio
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from pydantic import BaseModel
 
 from app.concurrency import buffer, debounce, dedup, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import flush
-from app.understanding.schemas import DummyReservation
+from app.understanding.schemas import TripType, descriptor_for
 
 SENDER = "whatsapp:+5215512345678"
+DESCRIPTOR = descriptor_for(TripType.CRUISE)
 
 
 class FakeChannel:
@@ -37,10 +39,10 @@ class FakeLLM:
         self.prompts: list[str] = []
 
     async def complete_structured(
-        self, prompt: str, schema: type[DummyReservation]
-    ) -> DummyReservation:
+        self, prompt: str, schema: type[BaseModel]
+    ) -> BaseModel:
         self.prompts.append(prompt)
-        return DummyReservation()
+        return schema()
 
 
 @pytest.fixture
@@ -80,7 +82,7 @@ async def test_duplicate_message_processed_once(
     assert await dedup.is_duplicate(redis_client, sid, config.dedup_ttl_s)
 
     channel = FakeChannel()
-    await flush(redis_client, channel, llm, SENDER, sid, config)
+    await flush(redis_client, channel, llm, DESCRIPTOR, SENDER, sid, config)
 
     # Processed exactly once, over the single buffered message.
     assert len(channel.sent) == 1
@@ -101,7 +103,10 @@ async def test_debounce_combines_messages(
     channel = FakeChannel()
     # Only the latest token (SM3) wins; the others abort.
     await asyncio.gather(
-        *(flush(redis_client, channel, llm, SENDER, sid, config) for sid, _ in messages)
+        *(
+            flush(redis_client, channel, llm, DESCRIPTOR, SENDER, sid, config)
+            for sid, _ in messages
+        )
     )
 
     # One flush, fed the combined text of all three messages.
@@ -126,7 +131,7 @@ async def test_flood_blocks_and_discards(
     await debounce.set_token(redis_client, SENDER, "SMx")
 
     channel = FakeChannel()
-    await flush(redis_client, channel, llm, SENDER, "SMx", config)
+    await flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SMx", config)
 
     assert channel.sent == []
     assert llm.prompts == []  # the engine was never invoked
@@ -141,8 +146,8 @@ async def test_lock_prevents_double_processing(
     channel = FakeChannel()
     # Two concurrent flushes for the same sender; the lock admits only one.
     await asyncio.gather(
-        flush(redis_client, channel, llm, SENDER, "SM1", config),
-        flush(redis_client, channel, llm, SENDER, "SM1", config),
+        flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SM1", config),
+        flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SM1", config),
     )
 
     assert len(channel.sent) == 1

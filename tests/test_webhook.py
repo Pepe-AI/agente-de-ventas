@@ -13,6 +13,7 @@ from collections.abc import Iterator, Mapping
 import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from app.channels.twilio import InvalidPayloadError, TwilioField
 from app.concurrency.config import ConcurrencyConfig
@@ -22,10 +23,11 @@ from app.main import (
     app,
     get_channel,
     get_concurrency_config,
+    get_descriptor,
     get_llm,
     get_redis,
 )
-from app.understanding.schemas import DummyReservation
+from app.understanding.schemas import TripType, descriptor_for
 
 VALID_FORM = {
     "From": "whatsapp:+5215512345678",
@@ -48,9 +50,9 @@ class StubLLM:
     """Never invoked in these tests (the flush does not run); satisfies get_llm."""
 
     async def complete_structured(
-        self, prompt: str, schema: type[DummyReservation]
-    ) -> DummyReservation:
-        return DummyReservation()
+        self, prompt: str, schema: type[BaseModel]
+    ) -> BaseModel:
+        return schema()
 
 
 class FakeChannel:
@@ -84,6 +86,7 @@ def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
     app.dependency_overrides[get_llm] = lambda: StubLLM()
     app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
+    app.dependency_overrides[get_descriptor] = lambda: descriptor_for(TripType.CRUISE)
     return TestClient(app)
 
 

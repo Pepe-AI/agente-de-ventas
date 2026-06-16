@@ -1,15 +1,25 @@
-"""Turn-understanding engine.
+"""Turn-understanding engine (pure extraction).
 
 One LLM call over the combined turn text returns the slots it could fill plus
 any user question. The engine never invents values: whatever the model leaves
-null is reported as missing.
+null is simply absent from ``filled``.
+
+Two design points (increment 4 cleanup):
+
+* The caller passes a *pure* extraction model (business slots only). The engine
+  composes the ``question`` field onto it internally, so the trip descriptors
+  stay free of engine concerns.
+* Deciding what is still required/missing is **not** the engine's job; it only
+  reports ``filled`` + ``question``. The orchestrator computes completeness from
+  the descriptor and the conversation state.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from app.llm.base import LLM
 
@@ -19,38 +29,85 @@ _INSTRUCTIONS = (
     "Eres un extractor de información para reservas de viaje. A partir del "
     "mensaje del usuario, llena solo los campos que puedas inferir con certeza. "
     "Deja en null cualquier campo que no sepas o que sea ambiguo: NUNCA "
-    "adivines ni inventes valores. Si el usuario hace una pregunta, cópiala "
-    f"textual en el campo '{QUESTION_FIELD}'; si no hay pregunta, déjalo en null."
+    "adivines ni inventes valores. Usa el contexto para resolver respuestas "
+    "breves o ambiguas (p. ej. un número suelto que responde a la última "
+    "pregunta). Si el usuario hace una pregunta, cópiala textual en el campo "
+    f"'{QUESTION_FIELD}'; si no hay pregunta, déjalo en null."
 )
 
 
 @dataclass(frozen=True, slots=True)
+class TurnContext:
+    """What the orchestrator knows going into a turn.
+
+    ``last_asked`` is the slot the bot last asked for (or ``None``); ``known``
+    is the state captured so far. Both are fed to the model so it can resolve
+    terse or ambiguous answers (e.g. map ``"4"`` to the slot just asked).
+    """
+
+    last_asked: str | None
+    known: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class Understanding:
-    """The engine's read of one turn."""
+    """The engine's read of one turn: what it filled and any user question."""
 
     filled: dict[str, object]
-    missing: list[str]
     question: str | None
 
 
-def _build_prompt(text: str) -> str:
-    return f"{_INSTRUCTIONS}\n\nMensaje del usuario:\n{text}"
+@cache
+def _compose_with_question(model: type[BaseModel]) -> type[BaseModel]:
+    """Derive ``model`` + a ``question`` field (cached per pure model).
+
+    The literal keyword must stay in sync with ``QUESTION_FIELD`` (used below to
+    strip the question back out); a drift would surface as a failing test.
+    """
+    return create_model(
+        f"{model.__name__}WithQuestion",
+        __base__=model,
+        question=(str | None, None),
+    )
+
+
+def _render_context(context: TurnContext) -> str:
+    if context.last_asked is None and not context.known:
+        return ""
+    lines = ["Contexto de la conversación:"]
+    if context.last_asked is not None:
+        lines.append(f"- Última pregunta enviada (slot): {context.last_asked}")
+    if context.known:
+        lines.append(f"- Datos ya capturados: {context.known}")
+    return "\n".join(lines)
+
+
+def _build_prompt(text: str, context: TurnContext) -> str:
+    parts = [_INSTRUCTIONS]
+    rendered = _render_context(context)
+    if rendered:
+        parts.append(rendered)
+    parts.append(f"Mensaje del usuario:\n{text}")
+    return "\n\n".join(parts)
 
 
 async def understand_turn(
-    llm: LLM, text: str, schema: type[BaseModel]
+    llm: LLM,
+    extraction_model: type[BaseModel],
+    text: str,
+    context: TurnContext,
 ) -> Understanding:
-    """Extract filled/missing slots and any question from a turn.
+    """Extract filled slots and any question from a turn.
 
-    ``schema`` defines the slots; every field except ``question`` is a slot. A
-    slot left null by the model is reported as missing (never invented).
+    ``extraction_model`` is the pure business model (no ``question`` field); the
+    engine composes ``question`` onto it before calling the model. A slot left
+    null by the model is simply absent from ``filled`` (never invented).
     """
-    result = await llm.complete_structured(_build_prompt(text), schema)
+    composed = _compose_with_question(extraction_model)
+    result = await llm.complete_structured(_build_prompt(text, context), composed)
     data = result.model_dump()
 
-    question = data.get(QUESTION_FIELD)
-    slots = {key: value for key, value in data.items() if key != QUESTION_FIELD}
-    filled = {key: value for key, value in slots.items() if value is not None}
-    missing = [key for key, value in slots.items() if value is None]
+    question = data.pop(QUESTION_FIELD, None)
+    filled = {key: value for key, value in data.items() if value is not None}
 
-    return Understanding(filled=filled, missing=missing, question=question)
+    return Understanding(filled=filled, question=question)

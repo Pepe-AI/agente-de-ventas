@@ -18,6 +18,7 @@ from app.concurrency.config import ConcurrencyConfig
 from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
 from app.llm.base import LLM
+from app.understanding.schemas import TripSchema
 
 log = structlog.get_logger()
 
@@ -31,13 +32,14 @@ def schedule_flush(
     redis: Redis,
     channel: Channel,
     llm: LLM,
+    descriptor: TripSchema,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
     """Schedule a flush for ``sender`` after the debounce window (non-blocking)."""
     task = asyncio.create_task(
-        _flush_after_window(redis, channel, llm, sender, token, config)
+        _flush_after_window(redis, channel, llm, descriptor, sender, token, config)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -47,18 +49,20 @@ async def _flush_after_window(
     redis: Redis,
     channel: Channel,
     llm: LLM,
+    descriptor: TripSchema,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
     await asyncio.sleep(config.debounce_window_s)
-    await flush(redis, channel, llm, sender, token, config)
+    await flush(redis, channel, llm, descriptor, sender, token, config)
 
 
 async def flush(
     redis: Redis,
     channel: Channel,
     llm: LLM,
+    descriptor: TripSchema,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -83,7 +87,10 @@ async def flush(
 
         combined = BUFFER_SEPARATOR.join(parts)
         reply = await handle_message(
-            IncomingMessage(sender=sender, text=combined, message_id=token), llm
+            IncomingMessage(sender=sender, text=combined, message_id=token),
+            llm,
+            redis,
+            descriptor,
         )
         await channel.send(sender, reply)
         log.info("flush_sent", sender=sender, parts=len(parts))

@@ -12,6 +12,8 @@ from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.understanding.schemas import TripType
+
 
 class HttpHeader(StrEnum):
     """HTTP header names used by the webhook (no magic strings)."""
@@ -40,6 +42,10 @@ class Settings(BaseSettings):
     # LLM (Gemini) configuration.
     gemini_api_key: SecretStr
     llm_model: str = "gemini-3.5-flash"
+
+    # Which trip schema a brand-new conversation starts on (campaign-based
+    # selection arrives in a later increment).
+    trip_type: TripType = TripType.CRUISE
 
     # Concurrency tunables (seconds / counts) with sensible defaults.
     debounce_window_s: float = 3.0
