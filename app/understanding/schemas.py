@@ -71,6 +71,9 @@ class SlotSpec:
     # For DESTINATION slots only: the optional free-text experience slot whose
     # presence also satisfies this required destination.
     escape_slot: str | None = None
+    # Whether the bot ever asks this slot. Passive slots (e.g. a destination's
+    # experience escape) are captured only from another answer, never asked.
+    askable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +165,7 @@ def _continent_schema(
             SlotSpec(
                 f"experiencia{suffix}", str, False,
                 "¿Qué tipo de experiencia buscas en este viaje?",
+                askable=False,  # passive: captured from the destination answer
             ),
             SlotSpec(
                 f"servicios{suffix}", str, False,

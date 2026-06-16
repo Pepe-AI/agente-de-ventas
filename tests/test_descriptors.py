@@ -80,6 +80,30 @@ def test_asia_mirrors_europe_with_suffix() -> None:
     assert destino.escape_slot == "experiencia_asia"
 
 
+def test_experience_escape_slots_are_not_askable() -> None:
+    # The destination-experience escapes are captured passively, never asked.
+    for trip, name in (
+        (TripType.EUROPE, "experiencia_europa"),
+        (TripType.ASIA, "experiencia_asia"),
+    ):
+        slot = next(s for s in descriptor_for(trip).slots if s.name == name)
+        assert slot.askable is False
+
+
+def test_cruise_experience_is_askable() -> None:
+    descriptor = descriptor_for(TripType.CRUISE)
+    slot = next(s for s in descriptor.slots if s.name == "experiencia_crucero")
+
+    assert slot.askable is True
+
+
+def test_slots_are_askable_by_default() -> None:
+    descriptor = descriptor_for(TripType.CRUISE)
+    slot = next(s for s in descriptor.slots if s.name == "nombre_cliente")
+
+    assert slot.askable is True
+
+
 def test_extraction_model_is_pure_no_question() -> None:
     model = extraction_model_for(TripType.CRUISE)
 

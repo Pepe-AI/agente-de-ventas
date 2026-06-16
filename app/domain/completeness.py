@@ -61,3 +61,23 @@ def next_required_slot(
         if slot.required and not is_satisfied(slot, slots):
             return slot
     return None
+
+
+def next_slot_to_ask(
+    descriptor: TripSchema, slots: dict[str, object], asked: set[str]
+) -> SlotSpec | None:
+    """Return the next askable slot to ask in flow order, or ``None``.
+
+    A slot is asked when it is askable and either required-and-unsatisfied, or
+    optional-and-neither-asked-nor-already-satisfied (so volunteered values are
+    skipped). ``None`` means nothing askable is left: all requireds satisfied
+    and all askable optionals already asked/answered -> ready to complete.
+    """
+    for slot in descriptor.slots:
+        if not slot.askable:
+            continue
+        if is_satisfied(slot, slots):
+            continue
+        if slot.required or slot.name not in asked:
+            return slot
+    return None

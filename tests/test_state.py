@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from fakeredis import FakeAsyncRedis
 
+from app.concurrency.keys import KeyPrefix, make_key
 from app.domain.state import Phase, load_state, merge_slots, save_state
 from app.understanding.schemas import TripType
 
@@ -102,6 +105,44 @@ async def test_save_then_load_round_trips() -> None:
     assert reloaded.slots == state.slots
     assert reloaded.last_asked == "fechas_crucero"
     assert reloaded.trip_type is TripType.CRUISE
+
+
+async def test_asked_defaults_empty_when_absent() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert state.asked == set()
+
+
+async def test_asked_set_persists_round_trip() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+    state.asked = {"nombre_cliente", "cabinas_crucero"}
+
+    await save_state(redis, SENDER, state)
+    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert reloaded.asked == {"nombre_cliente", "cabinas_crucero"}
+
+
+async def test_load_tolerates_state_without_asked_key() -> None:
+    # A state persisted by 4a-core (before `asked` existed) loads cleanly.
+    redis = FakeAsyncRedis(decode_responses=True)
+    legacy = json.dumps(
+        {
+            "trip_type": "cruise",
+            "slots": {"nombre_cliente": "Ana"},
+            "phase": "collecting",
+            "last_asked": "ruta_crucero",
+        }
+    )
+    await redis.set(make_key(KeyPrefix.STATE, SENDER), legacy)
+
+    state = await load_state(redis, SENDER, TripType.CRUISE)
+
+    assert state.asked == set()
+    assert state.slots == {"nombre_cliente": "Ana"}
 
 
 async def test_stored_trip_type_wins_over_default() -> None:

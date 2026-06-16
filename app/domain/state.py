@@ -30,6 +30,10 @@ def _empty_slots() -> dict[str, Any]:
     return {}
 
 
+def _empty_asked() -> set[str]:
+    return set()
+
+
 @dataclass(slots=True)
 class ConversationState:
     """Mutable per-turn working state for one sender."""
@@ -38,6 +42,9 @@ class ConversationState:
     slots: dict[str, Any] = field(default_factory=_empty_slots)
     phase: Phase = Phase.COLLECTING
     last_asked: str | None = None
+    # Slots already asked (so optionals are not asked twice). Persisted as a
+    # list in JSON since sets are not JSON-serializable.
+    asked: set[str] = field(default_factory=_empty_asked)
 
 
 def merge_slots(
@@ -89,6 +96,8 @@ async def load_state(
         slots=data["slots"],
         phase=Phase(data["phase"]),
         last_asked=data["last_asked"],
+        # Tolerate states persisted before `asked` existed (4a-core).
+        asked=set(data.get("asked", [])),
     )
 
 
@@ -100,6 +109,7 @@ async def save_state(redis: Redis, sender: str, state: ConversationState) -> Non
             "slots": state.slots,
             "phase": state.phase.value,
             "last_asked": state.last_asked,
+            "asked": sorted(state.asked),
         }
     )
     await redis.set(_key(sender), payload)

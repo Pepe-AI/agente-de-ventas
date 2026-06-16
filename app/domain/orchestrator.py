@@ -1,9 +1,10 @@
 """Per-turn orchestrator: the conversation backbone (happy path).
 
 One turn = load state, understand the turn, merge what was filled, then compute
-the next required slot from the descriptor. If one remains, ask it; if none do,
-the form is complete: hand off to a human (reason ``completa``) and say goodbye.
-State is persisted between turns in Redis.
+the next askable slot from the descriptor (requireds + optionals, in flow
+order). If one remains, ask it (and mark it asked so optionals are asked once);
+if none do, the form is complete: hand off to a human (reason ``completa``) and
+say goodbye. State is persisted between turns in Redis.
 
 Out of scope here (later increments): answering user questions, retries / a
 ``stuck`` reason, and selecting the schema by campaign.
@@ -15,7 +16,7 @@ from redis.asyncio import Redis
 
 from app.concurrency.handoff import set_handoff
 from app.crm.relay import relay_to_human
-from app.domain.completeness import next_required_slot
+from app.domain.completeness import next_slot_to_ask
 from app.domain.models import HandoffEvent, HandoffReason, IncomingMessage
 from app.domain.state import (
     ConversationState,
@@ -58,10 +59,11 @@ async def handle_message(
     state.slots = merge_slots(state.slots, understanding.filled)
     # 4a-core ignores any detected user question (no answerer yet).
 
-    nxt = next_required_slot(descriptor, state.slots)
+    nxt = next_slot_to_ask(descriptor, state.slots, state.asked)
     if nxt is None:
         return await _complete(redis, msg, state)
 
+    state.asked.add(nxt.name)
     state.last_asked = nxt.name
     await save_state(redis, msg.sender, state)
     return nxt.prompt
