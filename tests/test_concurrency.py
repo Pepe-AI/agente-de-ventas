@@ -16,10 +16,32 @@ from pydantic import BaseModel
 from app.concurrency import buffer, debounce, dedup, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import flush
-from app.understanding.schemas import TripType, descriptor_for
+from app.domain.state import ConversationState
+from app.routing.campaign import RoutingConfig
+from app.understanding.schemas import TripType
+from tests.fakes import InMemoryStateStore
 
 SENDER = "whatsapp:+5215512345678"
-DESCRIPTOR = descriptor_for(TripType.CRUISE)
+ROUTING = RoutingConfig(prefill_crucero=None, prefill_europa=None, prefill_asia=None)
+CORPUS = "CORPUS DE PRUEBA"
+
+
+async def _route_to_cruise(store: InMemoryStateStore) -> None:
+    """Seed an already-routed conversation so the flush exercises the engine
+    (not the routing pre-phase)."""
+    await store.save(SENDER, ConversationState(trip_type=TripType.CRUISE))
+
+
+async def _flush(
+    redis: FakeAsyncRedis,
+    channel: FakeChannel,
+    llm: FakeLLM,
+    store: InMemoryStateStore,
+    sid: str,
+    config: ConcurrencyConfig,
+) -> None:
+    """Run a flush for SENDER with the test's fixed routing config + corpus."""
+    await flush(redis, channel, llm, store, ROUTING, CORPUS, SENDER, sid, config)
 
 
 class FakeChannel:
@@ -56,6 +78,11 @@ def llm() -> FakeLLM:
 
 
 @pytest.fixture
+def store() -> InMemoryStateStore:
+    return InMemoryStateStore()
+
+
+@pytest.fixture
 def config() -> ConcurrencyConfig:
     # Small windows/thresholds; flush() itself does not sleep.
     return ConcurrencyConfig(
@@ -70,9 +97,13 @@ def config() -> ConcurrencyConfig:
 
 
 async def test_duplicate_message_processed_once(
-    redis_client: FakeAsyncRedis, llm: FakeLLM, config: ConcurrencyConfig
+    redis_client: FakeAsyncRedis,
+    llm: FakeLLM,
+    store: InMemoryStateStore,
+    config: ConcurrencyConfig,
 ) -> None:
     sid = "SM1"
+    await _route_to_cruise(store)
 
     assert not await dedup.is_duplicate(redis_client, sid, config.dedup_ttl_s)
     await buffer.append(redis_client, SENDER, "hi")
@@ -82,7 +113,7 @@ async def test_duplicate_message_processed_once(
     assert await dedup.is_duplicate(redis_client, sid, config.dedup_ttl_s)
 
     channel = FakeChannel()
-    await flush(redis_client, channel, llm, DESCRIPTOR, SENDER, sid, config)
+    await _flush(redis_client, channel, llm, store, sid, config)
 
     # Processed exactly once, over the single buffered message.
     assert len(channel.sent) == 1
@@ -92,8 +123,12 @@ async def test_duplicate_message_processed_once(
 
 
 async def test_debounce_combines_messages(
-    redis_client: FakeAsyncRedis, llm: FakeLLM, config: ConcurrencyConfig
+    redis_client: FakeAsyncRedis,
+    llm: FakeLLM,
+    store: InMemoryStateStore,
+    config: ConcurrencyConfig,
 ) -> None:
+    await _route_to_cruise(store)
     messages = [("SM1", "a"), ("SM2", "b"), ("SM3", "c")]
     for sid, text in messages:
         assert not await dedup.is_duplicate(redis_client, sid, config.dedup_ttl_s)
@@ -104,7 +139,7 @@ async def test_debounce_combines_messages(
     # Only the latest token (SM3) wins; the others abort.
     await asyncio.gather(
         *(
-            flush(redis_client, channel, llm, DESCRIPTOR, SENDER, sid, config)
+            _flush(redis_client, channel, llm, store, sid, config)
             for sid, _ in messages
         )
     )
@@ -116,7 +151,10 @@ async def test_debounce_combines_messages(
 
 
 async def test_flood_blocks_and_discards(
-    redis_client: FakeAsyncRedis, llm: FakeLLM, config: ConcurrencyConfig
+    redis_client: FakeAsyncRedis,
+    llm: FakeLLM,
+    store: InMemoryStateStore,
+    config: ConcurrencyConfig,
 ) -> None:
     hits = 0
     for _ in range(config.rate_threshold + 1):
@@ -131,14 +169,17 @@ async def test_flood_blocks_and_discards(
     await debounce.set_token(redis_client, SENDER, "SMx")
 
     channel = FakeChannel()
-    await flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SMx", config)
+    await _flush(redis_client, channel, llm, store, "SMx", config)
 
     assert channel.sent == []
     assert llm.prompts == []  # the engine was never invoked
 
 
 async def test_lock_prevents_double_processing(
-    redis_client: FakeAsyncRedis, llm: FakeLLM, config: ConcurrencyConfig
+    redis_client: FakeAsyncRedis,
+    llm: FakeLLM,
+    store: InMemoryStateStore,
+    config: ConcurrencyConfig,
 ) -> None:
     await buffer.append(redis_client, SENDER, "x")
     await debounce.set_token(redis_client, SENDER, "SM1")
@@ -146,8 +187,8 @@ async def test_lock_prevents_double_processing(
     channel = FakeChannel()
     # Two concurrent flushes for the same sender; the lock admits only one.
     await asyncio.gather(
-        flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SM1", config),
-        flush(redis_client, channel, llm, DESCRIPTOR, SENDER, "SM1", config),
+        _flush(redis_client, channel, llm, store, "SM1", config),
+        _flush(redis_client, channel, llm, store, "SM1", config),
     )
 
     assert len(channel.sent) == 1

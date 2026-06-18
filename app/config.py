@@ -12,8 +12,6 @@ from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.understanding.schemas import TripType
-
 
 class HttpHeader(StrEnum):
     """HTTP header names used by the webhook (no magic strings)."""
@@ -39,13 +37,22 @@ class Settings(BaseSettings):
     # Redis connection (Render internal URL, set in the dashboard).
     redis_url: str
 
+    # Postgres connection (Render's DATABASE_URL): durable state source of truth.
+    database_url: str
+
     # LLM (Gemini) configuration.
     gemini_api_key: SecretStr
     llm_model: str = "gemini-3.5-flash"
 
-    # Which trip schema a brand-new conversation starts on (campaign-based
-    # selection arrives in a later increment).
-    trip_type: TripType = TripType.CRUISE
+    # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
+    # until the client delivers the real campaign copy (G1); when set, a phrase
+    # found in the first message routes to that trip type.
+    prefill_crucero: str | None = None
+    prefill_europa: str | None = None
+    prefill_asia: str | None = None
+
+    # Knowledge corpus for the CAG answerer, loaded once at startup.
+    corpus_path: str = "app/corpus_topviajes.md"
 
     # Concurrency tunables (seconds / counts) with sensible defaults.
     debounce_window_s: float = 3.0

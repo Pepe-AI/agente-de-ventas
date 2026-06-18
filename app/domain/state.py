@@ -8,14 +8,10 @@ JSON-friendly (scalars / lists / nested dicts).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
-from redis.asyncio import Redis
-
-from app.concurrency.keys import KeyPrefix, make_key
 from app.understanding.schemas import TripType
 
 
@@ -23,7 +19,9 @@ class Phase(StrEnum):
     """Where the conversation is in its lifecycle."""
 
     COLLECTING = "collecting"
-    COMPLETED = "completed"
+    # Terminal: handed off to a human for ANY reason (completa / atorado /
+    # pidió_humano). Not "completed" — the bot stays silent from here on.
+    HANDED_OFF = "handed_off"
 
 
 def _empty_slots() -> dict[str, Any]:
@@ -46,7 +44,8 @@ def _empty_pending() -> set[str]:
 class ConversationState:
     """Mutable per-turn working state for one sender."""
 
-    trip_type: TripType
+    # ``None`` until the campaign router picks a trip type (the routing pre-phase).
+    trip_type: TripType | None = None
     slots: dict[str, Any] = field(default_factory=_empty_slots)
     phase: Phase = Phase.COLLECTING
     last_asked: str | None = None
@@ -58,6 +57,62 @@ class ConversationState:
     # Required slots given up on after too many failed attempts (persisted as a
     # list, like ``asked``).
     pending: set[str] = field(default_factory=_empty_pending)
+    # The last message the bot sent, for answering follow-up questions ("¿y eso?").
+    last_bot_message: str | None = None
+
+
+def to_payload(state: ConversationState) -> dict[str, Any]:
+    """Serialize state to a JSON-safe dict (the single transport-agnostic form).
+
+    Sets become sorted lists; the trip-type enum becomes its value. Reused by
+    every backend (Redis today, Postgres in increment 5) so the wire format
+    never diverges.
+    """
+    return {
+        "trip_type": state.trip_type.value if state.trip_type is not None else None,
+        "slots": state.slots,
+        "phase": state.phase.value,
+        "last_asked": state.last_asked,
+        "asked": sorted(state.asked),
+        "attempts": state.attempts,
+        "pending": sorted(state.pending),
+        "last_bot_message": state.last_bot_message,
+    }
+
+
+def from_payload(data: dict[str, Any]) -> ConversationState:
+    """Rebuild state from :func:`to_payload`'s dict.
+
+    Tolerates payloads written before later fields existed (4a-core / 4a-extra-1).
+    """
+    stored_trip_type = data["trip_type"]
+    return ConversationState(
+        trip_type=TripType(stored_trip_type) if stored_trip_type is not None else None,
+        slots=data["slots"],
+        phase=Phase(data["phase"]),
+        last_asked=data["last_asked"],
+        asked=set(data.get("asked", [])),
+        attempts=data.get("attempts", {}),
+        pending=set(data.get("pending", [])),
+        last_bot_message=data.get("last_bot_message"),
+    )
+
+
+class StateStore(Protocol):
+    """Durable conversation-state store (the source of truth for state).
+
+    A port, like the LLM port: the domain depends on this abstraction, not on a
+    driver. ``conversation_id`` is the same per-conversation key the state used
+    in Redis (the sender).
+    """
+
+    async def load(self, conversation_id: str) -> ConversationState | None:
+        """Return the stored state, or ``None`` if the conversation is new."""
+        ...
+
+    async def save(self, conversation_id: str, state: ConversationState) -> None:
+        """Persist (upsert) the state for ``conversation_id``."""
+        ...
 
 
 def merge_slots(
@@ -86,48 +141,3 @@ def merge_slots(
         else:
             merged[name] = value
     return merged
-
-
-def _key(sender: str) -> str:
-    return make_key(KeyPrefix.STATE, sender)
-
-
-async def load_state(
-    redis: Redis, sender: str, default_trip_type: TripType
-) -> ConversationState:
-    """Load the sender's state, or initialize it on ``default_trip_type``.
-
-    A stored trip type wins over the default: once a conversation started on a
-    schema, the configured default must not switch it mid-conversation.
-    """
-    raw = await redis.get(_key(sender))
-    if raw is None:
-        return ConversationState(trip_type=default_trip_type)
-    data: dict[str, Any] = json.loads(raw)
-    return ConversationState(
-        trip_type=TripType(data["trip_type"]),
-        slots=data["slots"],
-        phase=Phase(data["phase"]),
-        last_asked=data["last_asked"],
-        # Tolerate states persisted before these fields existed (4a-core /
-        # 4a-extra-1).
-        asked=set(data.get("asked", [])),
-        attempts=data.get("attempts", {}),
-        pending=set(data.get("pending", [])),
-    )
-
-
-async def save_state(redis: Redis, sender: str, state: ConversationState) -> None:
-    """Persist the sender's state."""
-    payload = json.dumps(
-        {
-            "trip_type": state.trip_type.value,
-            "slots": state.slots,
-            "phase": state.phase.value,
-            "last_asked": state.last_asked,
-            "asked": sorted(state.asked),
-            "attempts": state.attempts,
-            "pending": sorted(state.pending),
-        }
-    )
-    await redis.set(_key(sender), payload)

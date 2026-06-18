@@ -1,27 +1,29 @@
-"""Per-turn orchestrator: the conversation backbone with failure escalation.
+"""Per-turn orchestrator: the conversation backbone (route, collect, answer).
 
-One turn = load state, understand the turn (filled + question + wants_human),
-merge what was filled, then:
+One turn:
 
-* if the user asked for a human → hand off immediately (``pidió_humano``);
-* otherwise charge a failed attempt to the last-asked required slot when the
-  answer was genuinely unusable (no data, no question), giving up on the slot
-  after 3 failures (it goes ``pending``);
-* compute the next askable slot (skipping ``pending``). If one remains, ask it
-  (retries are reformulated, not literal). If none remains, hand off with
-  reason ``completa`` (all requireds satisfied) or ``atorado`` (a required was
-  given up on).
+* if the conversation is not routed yet (``trip_type is None``), run the routing
+  pre-phase: classify the trip type from the message (or the disambiguation
+  reply) and either start the flow (first schema question) or ask which trip it
+  is. No understanding/slot-filling happens during routing;
+* otherwise understand the turn (filled + question + wants_human), merge it, and:
+  - if the user asked for a human → hand off immediately (``pidió_humano``);
+  - else charge a failed attempt to the last-asked required slot when the answer
+    was genuinely unusable, giving up on it after 3 failures (it goes ``pending``);
+  - compute the flow continuation: the next askable slot's prompt (retries are
+    reformulated) or the handoff farewell (``completa`` if all requireds are
+    satisfied, ``atorado`` if a required was given up on);
+  - if the turn carried a question, answer it from the corpus (CAG) and prepend
+    that answer to the continuation, in a single message.
 
 State is persisted between turns in Redis.
-
-Out of scope here (later increments): answering user questions (only detected,
-to not count them as failures) and selecting the schema by campaign.
 """
 
 from __future__ import annotations
 
 from redis.asyncio import Redis
 
+from app.answering.answerer import answer_question
 from app.concurrency.handoff import set_handoff
 from app.crm.relay import relay_to_human
 from app.domain.completeness import is_satisfied, next_slot_to_ask
@@ -29,15 +31,16 @@ from app.domain.models import HandoffEvent, HandoffReason, IncomingMessage
 from app.domain.state import (
     ConversationState,
     Phase,
-    load_state,
+    StateStore,
     merge_slots,
-    save_state,
 )
 from app.llm.base import LLM
+from app.routing.campaign import RoutingConfig, classify_trip_type
 from app.understanding.engine import TurnContext, Understanding, understand_turn
 from app.understanding.schemas import (
     SlotSpec,
     TripSchema,
+    TripType,
     descriptor_for,
     extraction_model_for,
 )
@@ -60,6 +63,12 @@ _FAREWELL_BY_REASON: dict[HandoffReason, str] = {
     HandoffReason.HUMAN_REQUESTED: _FAREWELL_HUMAN,
 }
 
+# Disambiguation question asked when the trip type cannot be inferred (adjustable).
+_DISAMBIGUATION_QUESTION = (
+    "¡Hola! Para ayudarte mejor, ¿tu viaje sería un crucero, un viaje a Europa "
+    "o un viaje a Asia?"
+)
+
 # Re-ask wording escalates so a retry never repeats the question literally.
 _REASK_PREFIXES = (
     "Perdona, no logré captar ese dato. ",
@@ -71,39 +80,119 @@ _MAX_FAILED_ATTEMPTS = 2
 
 
 async def handle_message(
-    msg: IncomingMessage, llm: LLM, redis: Redis, default: TripSchema
-) -> str:
-    """Run one conversation turn and return the bot's reply.
+    msg: IncomingMessage,
+    llm: LLM,
+    redis: Redis,
+    store: StateStore,
+    routing: RoutingConfig,
+    corpus: str,
+) -> str | None:
+    """Run one conversation turn and return the bot's reply (``None`` = silent).
 
-    ``default`` is the configured schema for a brand-new conversation; an
-    in-progress conversation keeps the schema it started on.
+    State is the durable source of truth (``store``); ``redis`` carries only the
+    handoff fast-path flag. ``routing`` has the campaign pre-fill phrases;
+    ``corpus`` is the answerer's knowledge base.
     """
-    state = await load_state(redis, msg.sender, default.trip_type)
-    descriptor = descriptor_for(state.trip_type)
+    state = await store.load(msg.sender) or ConversationState()
+
+    # Handoff idempotency backstop: if the durable state says this conversation
+    # was already handed off, stay silent and do NOT re-trigger handoff — even if
+    # the Redis fast-path flag was lost (e.g. a Redis restart). Restore the flag.
+    if state.phase is Phase.HANDED_OFF:
+        await set_handoff(redis, msg.sender)
+        return None
+
+    # Routing pre-phase: a not-yet-routed conversation picks a trip type first.
+    if state.trip_type is None:
+        return await _route(redis, store, msg, state, routing)
+
+    trip_type = state.trip_type  # routed: non-None for the rest of the turn
+    descriptor = descriptor_for(trip_type)
 
     understanding = await understand_turn(
         llm,
-        extraction_model_for(state.trip_type),
+        extraction_model_for(trip_type),
         msg.text,
         TurnContext(last_asked=state.last_asked, known=state.slots),
     )
     state.slots = merge_slots(state.slots, understanding.filled)
 
-    # A request for a human escalates immediately, before any slot logic.
+    # A request for a human escalates immediately, before any slot/answer logic.
     if understanding.wants_human:
-        return await _handoff(redis, msg, state, HandoffReason.HUMAN_REQUESTED)
+        reason = HandoffReason.HUMAN_REQUESTED
+        farewell = _FAREWELL_BY_REASON[reason]
+        return await _handoff(redis, store, msg, state, reason, farewell, trip_type)
 
     _count_failed_attempt(descriptor, state, understanding)
 
+    # The flow continuation: the next slot to ask, or the handoff farewell.
     nxt = next_slot_to_ask(descriptor, state.slots, state.asked, state.pending)
     if nxt is None:
         reason = HandoffReason.STUCK if state.pending else HandoffReason.COMPLETE
-        return await _handoff(redis, msg, state, reason)
+        reply = await _with_answer(
+            understanding, llm, corpus, trip_type, state.last_bot_message,
+            _FAREWELL_BY_REASON[reason],
+        )
+        return await _handoff(redis, store, msg, state, reason, reply, trip_type)
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
-    await save_state(redis, msg.sender, state)
-    return _ask_prompt(nxt, state.attempts)
+    reply = await _with_answer(
+        understanding, llm, corpus, trip_type, state.last_bot_message,
+        _ask_prompt(nxt, state.attempts),
+    )
+    return await _send(store, msg, state, reply)
+
+
+async def _route(
+    redis: Redis,
+    store: StateStore,
+    msg: IncomingMessage,
+    state: ConversationState,
+    routing: RoutingConfig,
+) -> str:
+    """Routing pre-phase: classify the trip type and start the flow, or ask.
+
+    We do NOT run understanding here: a pre-fill / disambiguation reply is not
+    slot data. Known limit (out of scope): ``wants_human`` is not detected during
+    routing (a 1-2 message pre-flow window); it works normally once routed.
+    """
+    trip_type = classify_trip_type(msg.text, msg.referral, routing)
+    if trip_type is None:
+        return await _send(store, msg, state, _DISAMBIGUATION_QUESTION)
+
+    state.trip_type = trip_type
+    descriptor = descriptor_for(trip_type)
+    nxt = next_slot_to_ask(descriptor, state.slots, state.asked, state.pending)
+    if nxt is None:  # a schema with no askable slots — defensive, not expected
+        reason = HandoffReason.COMPLETE
+        farewell = _FAREWELL_BY_REASON[reason]
+        return await _handoff(redis, store, msg, state, reason, farewell, trip_type)
+
+    state.asked.add(nxt.name)
+    state.last_asked = nxt.name
+    return await _send(store, msg, state, _ask_prompt(nxt, state.attempts))
+
+
+async def _with_answer(
+    understanding: Understanding,
+    llm: LLM,
+    corpus: str,
+    trip_type: TripType,
+    last_bot_message: str | None,
+    base: str,
+) -> str:
+    """Prepend the answer to a turn's question (if any) to ``base``.
+
+    ``last_bot_message`` is the previous turn's message (we update it after
+    composing) so follow-ups like "¿y eso?" keep their context.
+    """
+    if not understanding.question:
+        return base
+    answer = await answer_question(
+        llm, corpus, trip_type, understanding.question, last_bot_message
+    )
+    return f"{answer}\n\n{base}"
 
 
 def _count_failed_attempt(
@@ -139,25 +228,42 @@ def _ask_prompt(slot: SlotSpec, attempts: dict[str, int]) -> str:
     return slot.prompt
 
 
+async def _send(
+    store: StateStore, msg: IncomingMessage, state: ConversationState, reply: str
+) -> str:
+    """Record the outgoing message, persist state, and return ``reply``."""
+    state.last_bot_message = reply
+    await store.save(msg.sender, state)
+    return reply
+
+
 async def _handoff(
     redis: Redis,
+    store: StateStore,
     msg: IncomingMessage,
     state: ConversationState,
     reason: HandoffReason,
+    reply: str,
+    trip_type: TripType,
 ) -> str:
-    """Persist, hand off to a human with ``reason``, and return the farewell."""
-    state.phase = Phase.COMPLETED
+    """Persist, hand off to a human with ``reason``, and return ``reply``.
+
+    ``reply`` is the full outgoing message (a farewell, possibly with an answered
+    question prepended).
+    """
+    state.phase = Phase.HANDED_OFF
     state.last_asked = None
-    await save_state(redis, msg.sender, state)
+    state.last_bot_message = reply
+    await store.save(msg.sender, state)
 
     await set_handoff(redis, msg.sender)
     await relay_to_human(
         msg,
         HandoffEvent(
             reason=reason,
-            trip_type=state.trip_type.value,
+            trip_type=trip_type.value,
             slots=state.slots,
             pending=tuple(sorted(state.pending)),
         ),
     )
-    return _FAREWELL_BY_REASON[reason]
+    return reply

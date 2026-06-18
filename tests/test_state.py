@@ -1,16 +1,77 @@
-"""Tests for the persistent conversation state (Redis-backed, per sender)."""
+"""Tests for ConversationState: serialization (to/from payload) and merge_slots.
+
+State persistence is exercised by the StateStore contract (test_storage.py); here
+we test the transport-agnostic serialization and the slot-merge logic.
+"""
 
 from __future__ import annotations
 
 import json
 
-from fakeredis import FakeAsyncRedis
-
-from app.concurrency.keys import KeyPrefix, make_key
-from app.domain.state import Phase, load_state, merge_slots, save_state
+from app.domain.state import (
+    ConversationState,
+    Phase,
+    from_payload,
+    merge_slots,
+    to_payload,
+)
 from app.understanding.schemas import TripType
 
-SENDER = "whatsapp:+5215512345678"
+# --- Serialization ----------------------------------------------------------
+
+
+def test_serialization_round_trips() -> None:
+    state = ConversationState(
+        trip_type=TripType.CRUISE,
+        slots={"nombre_cliente": "Ana", "pasajeros_crucero": {"adults": 2}},
+        phase=Phase.HANDED_OFF,
+        last_asked="fechas_crucero",
+        asked={"ruta_crucero", "fechas_crucero"},
+        attempts={"presupuesto_crucero": 2},
+        pending={"presupuesto_crucero"},
+        last_bot_message="¿En qué fechas?",
+    )
+
+    restored = from_payload(to_payload(state))
+
+    assert restored == state
+
+
+def test_payload_is_json_safe() -> None:
+    state = ConversationState(trip_type=TripType.EUROPE, asked={"a"}, pending={"b"})
+
+    payload = to_payload(state)
+
+    # Round-trips through JSON unchanged (sets serialized as lists, enum as value).
+    assert from_payload(json.loads(json.dumps(payload))) == state
+
+
+def test_from_payload_none_trip_type() -> None:
+    state = ConversationState()  # not routed yet
+
+    assert from_payload(to_payload(state)).trip_type is None
+
+
+def test_from_payload_tolerates_legacy_payload_missing_late_fields() -> None:
+    # A payload written before asked/attempts/pending/last_bot_message existed
+    # (4a-core) deserializes cleanly with their defaults.
+    legacy = {
+        "trip_type": "cruise",
+        "slots": {"nombre_cliente": "Ana"},
+        "phase": "collecting",
+        "last_asked": "ruta_crucero",
+    }
+
+    state = from_payload(legacy)
+
+    assert state.slots == {"nombre_cliente": "Ana"}
+    assert state.asked == set()
+    assert state.attempts == {}
+    assert state.pending == set()
+    assert state.last_bot_message is None
+
+
+# --- merge_slots ------------------------------------------------------------
 
 
 def test_merge_replaces_scalar_slots() -> None:
@@ -76,124 +137,3 @@ def test_merge_preserves_prior_on_top_level_null() -> None:
     merged = merge_slots({"nombre_cliente": "Ana"}, {"nombre_cliente": None})
 
     assert merged == {"nombre_cliente": "Ana"}
-
-
-async def test_load_initializes_when_absent() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert state.trip_type is TripType.CRUISE
-    assert state.slots == {}
-    assert state.phase is Phase.COLLECTING
-    assert state.last_asked is None
-
-
-async def test_save_then_load_round_trips() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-    state.slots = {
-        "nombre_cliente": "Ana",
-        "pasajeros_crucero": {"adults": 2, "minors_mentioned": False},
-    }
-    state.last_asked = "fechas_crucero"
-    state.phase = Phase.COLLECTING
-
-    await save_state(redis, SENDER, state)
-    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert reloaded.slots == state.slots
-    assert reloaded.last_asked == "fechas_crucero"
-    assert reloaded.trip_type is TripType.CRUISE
-
-
-async def test_asked_defaults_empty_when_absent() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert state.asked == set()
-
-
-async def test_asked_set_persists_round_trip() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-    state.asked = {"nombre_cliente", "cabinas_crucero"}
-
-    await save_state(redis, SENDER, state)
-    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert reloaded.asked == {"nombre_cliente", "cabinas_crucero"}
-
-
-async def test_load_tolerates_state_without_asked_key() -> None:
-    # A state persisted by 4a-core (before `asked` existed) loads cleanly.
-    redis = FakeAsyncRedis(decode_responses=True)
-    legacy = json.dumps(
-        {
-            "trip_type": "cruise",
-            "slots": {"nombre_cliente": "Ana"},
-            "phase": "collecting",
-            "last_asked": "ruta_crucero",
-        }
-    )
-    await redis.set(make_key(KeyPrefix.STATE, SENDER), legacy)
-
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert state.asked == set()
-    assert state.slots == {"nombre_cliente": "Ana"}
-
-
-async def test_attempts_and_pending_default_empty() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert state.attempts == {}
-    assert state.pending == set()
-
-
-async def test_attempts_and_pending_persist_round_trip() -> None:
-    redis = FakeAsyncRedis(decode_responses=True)
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-    state.attempts = {"presupuesto_crucero": 2}
-    state.pending = {"fechas_crucero"}
-
-    await save_state(redis, SENDER, state)
-    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert reloaded.attempts == {"presupuesto_crucero": 2}
-    assert reloaded.pending == {"fechas_crucero"}
-
-
-async def test_load_tolerates_state_without_attempts_or_pending() -> None:
-    # A state persisted by 4a-extra-1 (before attempts/pending) loads cleanly.
-    redis = FakeAsyncRedis(decode_responses=True)
-    legacy = json.dumps(
-        {
-            "trip_type": "cruise",
-            "slots": {},
-            "phase": "collecting",
-            "last_asked": None,
-            "asked": ["nombre_cliente"],
-        }
-    )
-    await redis.set(make_key(KeyPrefix.STATE, SENDER), legacy)
-
-    state = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert state.attempts == {}
-    assert state.pending == set()
-    assert state.asked == {"nombre_cliente"}
-
-
-async def test_stored_trip_type_wins_over_default() -> None:
-    # Once a conversation started on a schema, a different default must not switch it.
-    redis = FakeAsyncRedis(decode_responses=True)
-    state = await load_state(redis, SENDER, TripType.EUROPE)
-    await save_state(redis, SENDER, state)
-
-    reloaded = await load_state(redis, SENDER, TripType.CRUISE)
-
-    assert reloaded.trip_type is TripType.EUROPE

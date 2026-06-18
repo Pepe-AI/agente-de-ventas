@@ -7,15 +7,19 @@ orchestrator and sending the reply) happens in a background flush.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
+import asyncpg
 import structlog
 from fastapi import Depends, FastAPI, Request, Response
 from redis.asyncio import Redis, from_url
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
+from app.answering.corpus import load_corpus
 from app.channels.base import Channel
 from app.channels.twilio import InvalidPayloadError, TwilioChannel
 from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
@@ -24,9 +28,11 @@ from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
 from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
+from app.domain.state import StateStore
 from app.llm.base import LLM
 from app.llm.gemini import build_gemini_llm
-from app.understanding.schemas import TripSchema, descriptor_for
+from app.routing.campaign import RoutingConfig
+from app.storage.postgres import PostgresStateStore, create_pool
 
 structlog.configure(
     processors=[
@@ -42,7 +48,23 @@ WEBHOOK_PATH = "/webhook/whatsapp"
 EMPTY_TWIML = "<Response></Response>"
 TWIML_MEDIA_TYPE = "application/xml"
 
-app = FastAPI(title="WhatsApp Echo Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Create the Postgres pool at startup and close it at shutdown.
+
+    Migrations are NOT run here (they race across instances) — see
+    ``app.storage.migrate``.
+    """
+    pool = await create_pool(get_settings().database_url)
+    app.state.pool = pool
+    try:
+        yield
+    finally:
+        await pool.close()
+
+
+app = FastAPI(title="WhatsApp Echo Agent", lifespan=lifespan)
 
 
 @lru_cache
@@ -78,9 +100,27 @@ def get_concurrency_config() -> ConcurrencyConfig:
     return ConcurrencyConfig.from_settings(get_settings())
 
 
-def get_descriptor() -> TripSchema:
-    """Select the trip schema a new conversation starts on (composition root)."""
-    return descriptor_for(get_settings().trip_type)
+def get_routing_config() -> RoutingConfig:
+    """Expose the campaign pre-fill phrases for trip-type routing."""
+    return RoutingConfig.from_settings(get_settings())
+
+
+def get_pool(request: Request) -> asyncpg.Pool:
+    """Return the Postgres pool created in the lifespan."""
+    return request.app.state.pool
+
+
+def get_store(
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+) -> StateStore:
+    """Build the durable state store over the pool (composition root)."""
+    return PostgresStateStore(pool)
+
+
+@lru_cache
+def get_corpus() -> str:
+    """Load the knowledge corpus once (composition root)."""
+    return load_corpus(get_settings().corpus_path)
 
 
 def build_public_url(request: Request) -> str:
@@ -112,7 +152,9 @@ async def whatsapp_webhook(
     redis: Annotated[Redis, Depends(get_redis)],
     llm: Annotated[LLM, Depends(get_llm)],
     config: Annotated[ConcurrencyConfig, Depends(get_concurrency_config)],
-    descriptor: Annotated[TripSchema, Depends(get_descriptor)],
+    store: Annotated[StateStore, Depends(get_store)],
+    routing: Annotated[RoutingConfig, Depends(get_routing_config)],
+    corpus: Annotated[str, Depends(get_corpus)],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
     # Twilio posts urlencoded fields; keep only str values (drop any uploads).
@@ -164,7 +206,9 @@ async def whatsapp_webhook(
 
     # 5. Register debounce token and schedule the background flush.
     await debounce.set_token(redis, sender, msg.message_id)
-    schedule_flush(redis, channel, llm, descriptor, sender, msg.message_id, config)
+    schedule_flush(
+        redis, channel, llm, store, routing, corpus, sender, msg.message_id, config
+    )
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)
     return _ack()

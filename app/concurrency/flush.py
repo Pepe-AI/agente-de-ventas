@@ -17,8 +17,9 @@ from app.concurrency import buffer, debounce, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
+from app.domain.state import StateStore
 from app.llm.base import LLM
-from app.understanding.schemas import TripSchema
+from app.routing.campaign import RoutingConfig
 
 log = structlog.get_logger()
 
@@ -32,14 +33,18 @@ def schedule_flush(
     redis: Redis,
     channel: Channel,
     llm: LLM,
-    descriptor: TripSchema,
+    store: StateStore,
+    routing: RoutingConfig,
+    corpus: str,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
     """Schedule a flush for ``sender`` after the debounce window (non-blocking)."""
     task = asyncio.create_task(
-        _flush_after_window(redis, channel, llm, descriptor, sender, token, config)
+        _flush_after_window(
+            redis, channel, llm, store, routing, corpus, sender, token, config
+        )
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -49,20 +54,24 @@ async def _flush_after_window(
     redis: Redis,
     channel: Channel,
     llm: LLM,
-    descriptor: TripSchema,
+    store: StateStore,
+    routing: RoutingConfig,
+    corpus: str,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
     await asyncio.sleep(config.debounce_window_s)
-    await flush(redis, channel, llm, descriptor, sender, token, config)
+    await flush(redis, channel, llm, store, routing, corpus, sender, token, config)
 
 
 async def flush(
     redis: Redis,
     channel: Channel,
     llm: LLM,
-    descriptor: TripSchema,
+    store: StateStore,
+    routing: RoutingConfig,
+    corpus: str,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -90,8 +99,14 @@ async def flush(
             IncomingMessage(sender=sender, text=combined, message_id=token),
             llm,
             redis,
-            descriptor,
+            store,
+            routing,
+            corpus,
         )
+        if reply is None:
+            # Already handed off: the orchestrator stays silent.
+            log.info("flush_silent", sender=sender)
+            return
         await channel.send(sender, reply)
         log.info("flush_sent", sender=sender, parts=len(parts))
     finally:

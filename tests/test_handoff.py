@@ -20,11 +20,14 @@ from app.main import (
     app,
     get_channel,
     get_concurrency_config,
-    get_descriptor,
+    get_corpus,
     get_llm,
     get_redis,
+    get_routing_config,
+    get_store,
 )
-from app.understanding.schemas import TripType, descriptor_for
+from app.routing.campaign import RoutingConfig
+from tests.fakes import InMemoryStateStore
 
 SENDER = "whatsapp:+5215512345678"
 VALID_FORM = {"From": SENDER, "Body": "hola", "MessageSid": "SM123"}
@@ -98,7 +101,11 @@ def _client_with(channel: FakeChannel) -> TestClient:
     app.dependency_overrides[get_redis] = lambda: FakeAsyncRedis(decode_responses=True)
     app.dependency_overrides[get_llm] = lambda: StubLLM()
     app.dependency_overrides[get_concurrency_config] = lambda: TEST_CONFIG
-    app.dependency_overrides[get_descriptor] = lambda: descriptor_for(TripType.CRUISE)
+    app.dependency_overrides[get_routing_config] = lambda: RoutingConfig(
+        prefill_crucero=None, prefill_europa=None, prefill_asia=None
+    )
+    app.dependency_overrides[get_store] = lambda: InMemoryStateStore()
+    app.dependency_overrides[get_corpus] = lambda: "CORPUS DE PRUEBA"
     return TestClient(app)
 
 
