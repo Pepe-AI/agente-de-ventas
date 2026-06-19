@@ -9,17 +9,33 @@ from __future__ import annotations
 
 from typing import TypeVar
 
+import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _JSON_MIME = "application/json"
+_RATE_LIMITED = 429
 
 
 class LLMError(RuntimeError):
     """Raised when the model does not return a valid schema instance."""
+
+
+def is_transient_gemini_error(exc: BaseException) -> bool:
+    """Whether a Gemini failure is transient and worth retrying.
+
+    Transient: a 5xx ``ServerError`` (e.g. 503 overloaded), a 429 rate-limit /
+    resource-exhausted ``ClientError``, or an httpx timeout. Permanent errors
+    (400, auth) are NOT transient and must not be retried.
+    """
+    if isinstance(exc, errors.ServerError):
+        return True
+    if isinstance(exc, errors.ClientError):
+        return getattr(exc, "code", None) == _RATE_LIMITED
+    return isinstance(exc, httpx.TimeoutException)
 
 
 class GeminiLLM:

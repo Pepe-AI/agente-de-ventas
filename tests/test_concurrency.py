@@ -13,10 +13,11 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from pydantic import BaseModel
 
-from app.concurrency import buffer, debounce, dedup, rate_limit
+from app.concurrency import buffer, debounce, dedup, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
-from app.concurrency.flush import flush
+from app.concurrency.flush import _GENERIC_APOLOGY, _LLM_FALLBACK, flush
 from app.domain.state import ConversationState
+from app.llm.base import LLMUnavailableError
 from app.routing.campaign import RoutingConfig
 from app.understanding.schemas import TripType
 from tests.fakes import InMemoryStateStore
@@ -193,3 +194,82 @@ async def test_lock_prevents_double_processing(
 
     assert len(channel.sent) == 1
     assert channel.sent[0][0] == SENDER
+
+
+# --- LLM-failure resilience -------------------------------------------------
+
+
+class RaisingLLM:
+    """Raises a fixed exception on every call (simulates a failing LLM)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def complete_structured(
+        self, prompt: str, schema: type[BaseModel]
+    ) -> BaseModel:
+        raise self._exc
+
+
+class RaisingChannel(FakeChannel):
+    """Channel whose send always fails (simulates Twilio being down)."""
+
+    async def send(self, to: str, text: str) -> None:
+        raise RuntimeError("transport down")
+
+
+async def _buffer_and_token(redis: FakeAsyncRedis) -> None:
+    await buffer.append(redis, SENDER, "hola")
+    await debounce.set_token(redis, SENDER, "SM1")
+
+
+async def test_flush_llm_unavailable_sends_fallback_and_preserves_state(
+    redis_client: FakeAsyncRedis, store: InMemoryStateStore, config: ConcurrencyConfig
+) -> None:
+    seeded = ConversationState(
+        trip_type=TripType.CRUISE, slots={"nombre_cliente": "Ana"}
+    )
+    await store.save(SENDER, seeded)  # routed, so understand_turn (the LLM) runs
+    await _buffer_and_token(redis_client)
+    channel = FakeChannel()
+    llm = RaisingLLM(LLMUnavailableError("retries exhausted"))
+
+    # The background task must NOT re-raise (no "exception never retrieved").
+    await _flush(redis_client, channel, llm, store, "SM1", config)
+
+    # Graceful fallback sent instead of silence.
+    assert channel.sent == [(SENDER, _LLM_FALLBACK)]
+    # State is not mutated (a resend will work).
+    assert await store.load(SENDER) == seeded
+    # Buffer drained and lock released (re-acquirable).
+    assert await buffer.drain(redis_client, SENDER) == []
+    assert await lock.acquire(redis_client, SENDER, "other-token", config.lock_ttl_s)
+
+
+async def test_flush_unexpected_error_sends_apology(
+    redis_client: FakeAsyncRedis, store: InMemoryStateStore, config: ConcurrencyConfig
+) -> None:
+    await _route_to_cruise(store)
+    await _buffer_and_token(redis_client)
+    channel = FakeChannel()
+    llm = RaisingLLM(RuntimeError("unexpected bug"))  # not an LLM-unavailable signal
+
+    await _flush(redis_client, channel, llm, store, "SM1", config)
+
+    assert channel.sent == [(SENDER, _GENERIC_APOLOGY)]
+    assert await lock.acquire(redis_client, SENDER, "other-token", config.lock_ttl_s)
+
+
+async def test_flush_does_not_crash_when_fallback_send_fails(
+    redis_client: FakeAsyncRedis, store: InMemoryStateStore, config: ConcurrencyConfig
+) -> None:
+    await _route_to_cruise(store)
+    await _buffer_and_token(redis_client)
+    channel = RaisingChannel()
+    llm = RaisingLLM(LLMUnavailableError("down"))
+
+    # Even the fallback send fails -> the task still must not re-raise.
+    await _flush(redis_client, channel, llm, store, "SM1", config)
+
+    # Cleanup still happened: the lock is released.
+    assert await lock.acquire(redis_client, SENDER, "other-token", config.lock_ttl_s)

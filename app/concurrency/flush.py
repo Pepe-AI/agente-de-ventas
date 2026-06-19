@@ -18,12 +18,22 @@ from app.concurrency.config import ConcurrencyConfig
 from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
 from app.domain.state import StateStore
-from app.llm.base import LLM
+from app.llm.base import LLM, LLMUnavailableError
 from app.routing.campaign import RoutingConfig
 
 log = structlog.get_logger()
 
 BUFFER_SEPARATOR = "\n"
+
+# Graceful replies when a turn cannot be processed (the bot must never go silent).
+_LLM_FALLBACK = (
+    "Estoy teniendo un problema momentáneo para procesar tu mensaje. "
+    "¿Me lo reenvías en un momento, por favor? 🙏"
+)
+_GENERIC_APOLOGY = (
+    "Disculpa, tuve un inconveniente para responderte. "
+    "¿Me reenvías tu último mensaje, por favor?"
+)
 
 # Keep strong references so background tasks are not garbage-collected mid-flight.
 _background_tasks: set[asyncio.Task[None]] = set()
@@ -95,19 +105,40 @@ async def flush(
             return
 
         combined = BUFFER_SEPARATOR.join(parts)
-        reply = await handle_message(
-            IncomingMessage(sender=sender, text=combined, message_id=token),
-            llm,
-            redis,
-            store,
-            routing,
-            corpus,
-        )
+        try:
+            reply = await handle_message(
+                IncomingMessage(sender=sender, text=combined, message_id=token),
+                llm,
+                redis,
+                store,
+                routing,
+                corpus,
+            )
+        except LLMUnavailableError:
+            # Transient LLM outage after retries. handle_message only persists on
+            # success, so state is untouched — ask the user to resend. Handled.
+            log.warning("flush_llm_unavailable", sender=sender)
+            await _safe_send(channel, sender, _LLM_FALLBACK)
+            return
+        except Exception:
+            # Unexpected bug: apologize and never let the background task crash.
+            log.exception("flush_handle_message_failed", sender=sender)
+            await _safe_send(channel, sender, _GENERIC_APOLOGY)
+            return
+
         if reply is None:
             # Already handed off: the orchestrator stays silent.
             log.info("flush_silent", sender=sender)
             return
-        await channel.send(sender, reply)
+        await _safe_send(channel, sender, reply)
         log.info("flush_sent", sender=sender, parts=len(parts))
     finally:
         await lock.release(redis, sender, lock_token)
+
+
+async def _safe_send(channel: Channel, sender: str, text: str) -> None:
+    """Send ``text``, swallowing transport errors so a flush never crashes."""
+    try:
+        await channel.send(sender, text)
+    except Exception:
+        log.exception("flush_send_failed", sender=sender)

@@ -14,6 +14,14 @@ from pydantic import BaseModel
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
+class LLMUnavailableError(RuntimeError):
+    """The LLM was unavailable after exhausting transient retries.
+
+    A port-level signal (provider-agnostic) so callers can degrade gracefully
+    on a transient outage without knowing about any specific SDK's errors.
+    """
+
+
 class LLM(Protocol):
     """A language model that returns structured, schema-validated output."""
 

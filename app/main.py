@@ -30,7 +30,8 @@ from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
 from app.domain.state import StateStore
 from app.llm.base import LLM
-from app.llm.gemini import build_gemini_llm
+from app.llm.gemini import build_gemini_llm, is_transient_gemini_error
+from app.llm.retry import RetryingLLM
 from app.routing.campaign import RoutingConfig
 from app.storage.postgres import PostgresStateStore, create_pool
 
@@ -87,12 +88,17 @@ def get_redis() -> Redis:
 
 @lru_cache
 def get_llm() -> LLM:
-    """Build the Gemini LLM adapter once (composition root)."""
+    """Build the Gemini LLM, wrapped in transient-failure retries (root).
+
+    Wrapping at the port covers both LLM calls (understand_turn + the answerer)
+    without touching their call sites.
+    """
     settings = get_settings()
-    return build_gemini_llm(
+    gemini = build_gemini_llm(
         api_key=settings.gemini_api_key.get_secret_value(),
         model=settings.llm_model,
     )
+    return RetryingLLM(gemini, is_transient_gemini_error)
 
 
 def get_concurrency_config() -> ConcurrencyConfig:

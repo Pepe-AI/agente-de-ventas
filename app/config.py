@@ -40,9 +40,10 @@ class Settings(BaseSettings):
     # Postgres connection (Render's DATABASE_URL): durable state source of truth.
     database_url: str
 
-    # LLM (Gemini) configuration.
+    # LLM (Gemini) configuration. Default to a GA-stable model so a deploy
+    # without the env var does not fall back to a fragile preview model.
     gemini_api_key: SecretStr
-    llm_model: str = "gemini-3.5-flash"
+    llm_model: str = "gemini-2.5-flash"
 
     # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
     # until the client delivers the real campaign copy (G1); when set, a phrase
