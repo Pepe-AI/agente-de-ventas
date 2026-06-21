@@ -12,10 +12,11 @@ import asyncio
 import pytest
 from fakeredis import FakeAsyncRedis
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from app.concurrency import buffer, debounce, dedup, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
-from app.concurrency.flush import _GENERIC_APOLOGY, _LLM_FALLBACK, flush
+from app.concurrency.flush import _GENERIC_APOLOGY, _LLM_FALLBACK, _safe_send, flush
 from app.domain.state import ConversationState
 from app.llm.base import LLMUnavailableError
 from app.routing.campaign import RoutingConfig
@@ -273,3 +274,16 @@ async def test_flush_does_not_crash_when_fallback_send_fails(
 
     # Cleanup still happened: the lock is released.
     assert await lock.acquire(redis_client, SENDER, "other-token", config.lock_ttl_s)
+
+
+async def test_safe_send_logs_transport_failure_and_does_not_propagate() -> None:
+    # "safe" means: never crashes the task AND leaves a trace (a Twilio outage
+    # must not be invisible).
+    channel = RaisingChannel()
+
+    with capture_logs() as logs:
+        await _safe_send(channel, SENDER, "hola")  # must not raise
+
+    events = [e for e in logs if e["event"] == "flush_send_failed"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "error"

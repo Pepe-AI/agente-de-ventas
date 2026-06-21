@@ -20,6 +20,14 @@ def test_timeout_is_transient() -> None:
     assert is_transient_gemini_error(httpx.TimeoutException("slow")) is True
 
 
+def test_connection_and_network_errors_are_transient() -> None:
+    # google-genai lets raw httpx transport errors propagate; a network blip is
+    # transient (connection refused, reset, read/write, server closed conn).
+    assert is_transient_gemini_error(httpx.ConnectError("refused")) is True
+    assert is_transient_gemini_error(httpx.ReadError("reset")) is True
+    assert is_transient_gemini_error(httpx.RemoteProtocolError("closed")) is True
+
+
 def test_permanent_client_error_is_not_transient() -> None:
     assert is_transient_gemini_error(errors.ClientError(400, {})) is False
 
