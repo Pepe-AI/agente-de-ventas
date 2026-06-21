@@ -21,6 +21,7 @@ class KeyPrefix(StrEnum):
     DEBOUNCE = "debounce"
     LOCK = "lock"
     HANDOFF = "handoff"
+    KOMMO_INBOUND = "kommo_inbound"
 
 
 def make_key(prefix: KeyPrefix, identifier: str) -> str:

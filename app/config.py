@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr
     llm_model: str = "gemini-2.5-flash"
 
+    # Kommo Chats API channel secret (HMAC key for in/outbound signing). OPTIONAL
+    # on purpose: a required field would force the migration runner (which calls
+    # get_settings) to demand it too. The Kommo webhook DI validates presence at
+    # request time instead.
+    kommo_channel_secret: SecretStr | None = None
+
     # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
     # until the client delivers the real campaign copy (G1); when set, a phrase
     # found in the first message routes to that trip type.

@@ -14,7 +14,7 @@ from typing import Annotated
 
 import asyncpg
 import structlog
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from redis.asyncio import Redis, from_url
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
@@ -26,6 +26,8 @@ from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
+from app.crm.kommo_inbound import enqueue_inbound
+from app.crm.kommo_signing import KommoHeader, KommoSigner
 from app.crm.relay import relay_to_human
 from app.domain.models import IncomingMessage
 from app.domain.state import StateStore
@@ -46,18 +48,26 @@ structlog.configure(
 log = structlog.get_logger()
 
 WEBHOOK_PATH = "/webhook/whatsapp"
+KOMMO_WEBHOOK_PATH = "/kommo/chats/webhook/{scope_id}"
 EMPTY_TWIML = "<Response></Response>"
 TWIML_MEDIA_TYPE = "application/xml"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Create the Postgres pool at startup and close it at shutdown.
+    """Validate boot-critical config, create the Postgres pool, close at shutdown.
 
-    Migrations are NOT run here (they race across instances) — see
-    ``app.storage.migrate``.
+    Fail-fast: the web app cannot serve the Kommo webhook without the channel
+    secret, so it refuses to boot if it is unset (checked BEFORE the pool so it
+    fails without a DB). This lives ONLY here — the migration runner never needs
+    the secret and must keep running without it. The request path still returns
+    503 (defense in depth). Migrations are NOT run here (they race across
+    instances) — see ``app.storage.migrate``.
     """
-    pool = await create_pool(get_settings().database_url)
+    settings = get_settings()
+    if settings.kommo_channel_secret is None:
+        raise RuntimeError("KOMMO_CHANNEL_SECRET must be set to run the web app")
+    pool = await create_pool(settings.database_url)
     app.state.pool = pool
     try:
         yield
@@ -127,6 +137,20 @@ def get_store(
 def get_corpus() -> str:
     """Load the knowledge corpus once (composition root)."""
     return load_corpus(get_settings().corpus_path)
+
+
+def get_kommo_signer() -> KommoSigner:
+    """Build the Kommo signer from the channel secret (composition root).
+
+    The secret is optional in Settings (to not couple the migration runner); a
+    missing secret fails clearly here, only on the Kommo webhook path.
+    """
+    secret = get_settings().kommo_channel_secret
+    if secret is None:
+        raise HTTPException(
+            status_code=503, detail="Kommo channel secret not configured"
+        )
+    return KommoSigner(secret.get_secret_value())
 
 
 def build_public_url(request: Request) -> str:
@@ -218,3 +242,32 @@ async def whatsapp_webhook(
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)
     return _ack()
+
+
+@app.post(KOMMO_WEBHOOK_PATH)
+async def kommo_chats_webhook(
+    scope_id: str,
+    request: Request,
+    signer: Annotated[KommoSigner, Depends(get_kommo_signer)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> Response:
+    """Inbound Kommo Chats webhook: verify (raw bytes) -> fast-ack -> enqueue.
+
+    Kommo sends each webhook once, without retries, on a tight deadline, so we
+    verify and durably enqueue, then return — the relay runs in the background.
+    """
+    # Raw bytes: never declare a body model, which would consume/re-parse them.
+    body = await request.body()
+    signature = request.headers.get(KommoHeader.SIGNATURE, "")
+    if not signature or not signer.verify(body, signature):
+        log.warning("kommo_invalid_signature", scope_id=scope_id)
+        return Response(status_code=401)
+
+    try:
+        await enqueue_inbound(redis, scope_id, body)
+    except Exception:
+        log.exception("kommo_enqueue_failed", scope_id=scope_id)
+        return Response(status_code=500)
+
+    log.info("kommo_inbound_enqueued", scope_id=scope_id)
+    return Response(status_code=200)
