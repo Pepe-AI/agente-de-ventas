@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # request time instead.
     kommo_channel_secret: SecretStr | None = None
 
+    # Kommo CRM API v4 long-lived Bearer token — a DIFFERENT credential from the
+    # Chats channel secret above. OPTIONAL for the same reason (migrate.py builds
+    # full Settings); the web app's lifespan fail-fast enforces presence at boot.
+    kommo_long_lived_token: SecretStr | None = None
+
     # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
     # until the client delivers the real campaign copy (G1); when set, a phrase
     # found in the first message routes to that trip type.

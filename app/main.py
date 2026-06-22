@@ -57,16 +57,18 @@ TWIML_MEDIA_TYPE = "application/xml"
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Validate boot-critical config, create the Postgres pool, close at shutdown.
 
-    Fail-fast: the web app cannot serve the Kommo webhook without the channel
-    secret, so it refuses to boot if it is unset (checked BEFORE the pool so it
-    fails without a DB). This lives ONLY here — the migration runner never needs
-    the secret and must keep running without it. The request path still returns
-    503 (defense in depth). Migrations are NOT run here (they race across
-    instances) — see ``app.storage.migrate``.
+    Fail-fast: the web app needs the Kommo credentials (the Chats channel secret
+    and the CRM long-lived token), so it refuses to boot if either is unset
+    (checked BEFORE the pool, so it fails without a DB). This lives ONLY here —
+    the migration runner never needs them and must keep running without them.
+    Migrations are NOT run here (they race across instances) — see
+    ``app.storage.migrate``.
     """
     settings = get_settings()
     if settings.kommo_channel_secret is None:
         raise RuntimeError("KOMMO_CHANNEL_SECRET must be set to run the web app")
+    if settings.kommo_long_lived_token is None:
+        raise RuntimeError("KOMMO_LONG_LIVED_TOKEN must be set to run the web app")
     pool = await create_pool(settings.database_url)
     app.state.pool = pool
     try:
