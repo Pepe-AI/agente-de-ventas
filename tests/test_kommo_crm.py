@@ -250,6 +250,80 @@ async def test_create_lead_raises_typed_error_on_non_2xx() -> None:
     assert exc_info.value.body == "Bad Request"
 
 
+async def test_update_lead_patches_custom_fields_status_and_pipeline() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        return httpx.Response(200, json={"id": _LEAD_ID, "status_id": 107566779})
+
+    cfv = [{"field_id": 1112708, "values": [{"value": "Italia"}]}]
+    async with _client(handler) as client:
+        result = await client.update_lead(
+            _LEAD_ID,
+            custom_fields_values=cfv,
+            status_id=107566779,
+            pipeline_id=13937935,
+        )
+
+    assert result == {"id": _LEAD_ID, "status_id": 107566779}
+    req = seen["req"]
+    assert req.method == "PATCH"
+    assert str(req.url) == f"{_BASE_URL}/api/v4/leads/{_LEAD_ID}"
+    assert req.headers["Authorization"] == f"Bearer {_TOKEN}"
+    # One PATCH carries custom fields AND the stage move (status + pipeline).
+    assert json.loads(req.content) == {
+        "custom_fields_values": cfv,
+        "status_id": 107566779,
+        "pipeline_id": 13937935,
+    }
+
+
+async def test_update_lead_sends_only_custom_fields_when_no_stage_move() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        return httpx.Response(200, json={"id": _LEAD_ID})
+
+    cfv = [{"field_id": 1112714, "values": [{"value": "Julio"}]}]
+    async with _client(handler) as client:
+        await client.update_lead(_LEAD_ID, custom_fields_values=cfv)
+
+    assert json.loads(seen["req"].content) == {"custom_fields_values": cfv}
+
+
+async def test_update_lead_omits_empty_custom_fields() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        return httpx.Response(200, json={"id": _LEAD_ID})
+
+    async with _client(handler) as client:
+        await client.update_lead(
+            _LEAD_ID, custom_fields_values=[], status_id=107566783, pipeline_id=13937935
+        )
+
+    # No field has a value -> custom_fields_values must NOT be in the body.
+    assert json.loads(seen["req"].content) == {
+        "status_id": 107566783,
+        "pipeline_id": 13937935,
+    }
+
+
+async def test_update_lead_raises_typed_error_on_non_2xx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Bad Request")
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoCrmError) as exc_info:
+            await client.update_lead(_LEAD_ID, status_id=1, pipeline_id=2)
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.body == "Bad Request"
+
+
 def test_kommo_long_lived_token_is_optional_so_migrate_is_unaffected() -> None:
     # migrate.py builds the full Settings; the token must NOT be required there.
     assert Settings.model_fields["kommo_long_lived_token"].is_required() is False

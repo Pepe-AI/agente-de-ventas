@@ -254,3 +254,19 @@ def descriptor_for(trip_type: TripType) -> TripSchema:
 def extraction_model_for(trip_type: TripType) -> type[BaseModel]:
     """Return the (cached) pure extraction model for ``trip_type``."""
     return _MODELS[trip_type]
+
+
+def escape_slot_names() -> frozenset[str]:
+    """Return every slot referenced as a destination escape, across all schemas.
+
+    These are the passive ``experiencia_*`` slots a DESTINATION slot falls back to
+    (``SlotSpec.escape_slot``, ``askable=False``). A value captured there is a
+    stated preference, not a confirmed destination — consumers (e.g. the CRM
+    payload builder) flag it as such.
+    """
+    return frozenset(
+        slot.escape_slot
+        for schema in _DESCRIPTORS.values()
+        for slot in schema.slots
+        if slot.escape_slot is not None
+    )

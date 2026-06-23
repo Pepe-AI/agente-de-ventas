@@ -34,6 +34,7 @@ import httpx
 _TIMEOUT_S = 15.0
 _ACCOUNT_PATH = "/api/v4/account"
 _LEAD_NOTES_PATH = "/api/v4/leads/notes"
+_LEADS_PATH = "/api/v4/leads"
 _CONTACTS_PATH = "/api/v4/contacts"
 _CONTACTS_CUSTOM_FIELDS_PATH = "/api/v4/contacts/custom_fields"
 _LEADS_COMPLEX_PATH = "/api/v4/leads/complex"
@@ -149,6 +150,32 @@ class KommoCrmClient:
         ]
         result = await self._request("POST", _LEADS_COMPLEX_PATH, json=payload)
         return _first_lead_id(result)
+
+    async def update_lead(
+        self,
+        lead_id: int,
+        *,
+        custom_fields_values: list[dict[str, object]] | None = None,
+        status_id: int | None = None,
+        pipeline_id: int | None = None,
+    ) -> object | None:
+        """Update a lead's custom fields and/or move its stage in ONE PATCH.
+
+        A pure transport primitive: it sends whatever non-empty parts it is given
+        to ``PATCH /api/v4/leads/{lead_id}``. Building ``custom_fields_values`` from
+        the slot state lives in ``app.crm.lead_payload`` (core, decision-agnostic),
+        not here. Moving a lead to a stage in another pipeline needs ``status_id``
+        AND ``pipeline_id`` together (a mismatch is a 400), so the caller passes
+        both; an empty ``custom_fields_values`` is omitted (Kommo rejects empty).
+        """
+        body: dict[str, object] = {}
+        if custom_fields_values:
+            body["custom_fields_values"] = custom_fields_values
+        if status_id is not None:
+            body["status_id"] = status_id
+        if pipeline_id is not None:
+            body["pipeline_id"] = pipeline_id
+        return await self._request("PATCH", f"{_LEADS_PATH}/{lead_id}", json=body)
 
     async def _resolve_phone_field_id(self) -> int:
         """Find the contact PHONE custom field's numeric id (cached per client)."""
