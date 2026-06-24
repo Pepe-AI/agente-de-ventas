@@ -42,18 +42,26 @@ CONCEPT_FIELD_IDS: dict[Concept, int] = {
 # Pipeline "Embudo de ventas" and the stage a handoff moves the lead to.
 PIPELINE_ID = 13937935
 
-# First stage "Incoming leads" of PIPELINE_ID: where a lead created without an
-# explicit status lands. A REUSED lead still sitting here is treated as new
-# (unpublished) and gets moved; a reused lead in any other stage is left where the
-# advisor placed it. (Assumes API-created-without-status leads land here.)
-INCOMING_STATUS_ID = 107559931
-
 # Handoff reason -> status_id (stage) within PIPELINE_ID. atorado and pidió_humano
 # share the "Atención 1 a 1" stage.
 REASON_STATUS_IDS: dict[HandoffReason, int] = {
     HandoffReason.COMPLETE: 107566779,  # Calificado
     HandoffReason.STUCK: 107566783,  # Atención 1 a 1
     HandoffReason.HUMAN_REQUESTED: 107566783,  # Atención 1 a 1
+}
+
+# Every stage of PIPELINE_ID by its sort order (lower = earlier in the funnel),
+# including the terminal won/lost stages (global ids 142/143). Drives the
+# forward-only reuse rule: a reused lead is re-published only when its current
+# stage is at or behind the reason's target stage; a stage outside this map
+# (unknown, or another pipeline) means the advisor owns it — don't move it.
+STATUS_SORT: dict[int, int] = {
+    107559931: 10,  # Incoming leads
+    107566779: 20,  # Calificado
+    107566783: 30,  # Atención 1 a 1
+    107566787: 40,  # No respondió
+    142: 10000,  # ganado (won — global terminal)
+    143: 11000,  # perdido (lost — global terminal)
 }
 
 # Stage for a lead that went silent past the inactivity window. Parked here as

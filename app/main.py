@@ -173,7 +173,7 @@ def get_handoff_runner() -> HandoffRunner:
         concept_field_ids=kommo_mapping.CONCEPT_FIELD_IDS,
         reason_status_ids=kommo_mapping.REASON_STATUS_IDS,
         pipeline_id=kommo_mapping.PIPELINE_ID,
-        incoming_status_id=kommo_mapping.INCOMING_STATUS_ID,
+        status_sort=kommo_mapping.STATUS_SORT,
     )
     return HandoffRunner(get_kommo_crm_client(), mapping)
 

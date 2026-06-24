@@ -11,10 +11,13 @@ publishing PATCH and the caller's flag flip come last):
 1. find-or-create: reuse the most recent existing lead (highest id — Kommo ids are
    monotonic and a phone search returns no timestamps), else create a new one;
 2. add the handoff note (the WHY) — before the publishing PATCH;
-3. update the lead's custom fields, and move its stage IF it is new OR a reused
-   lead still sitting in "Incoming leads" (created-but-never-published, e.g. a
-   prior attempt that failed after creating); a reused lead the advisor already
-   moved is left in place;
+3. update the lead's custom fields ALWAYS, and move its stage only FORWARD: for a
+   new lead, or a reused lead whose current stage is at or behind the reason's
+   target stage in the funnel's sort order (so a prior failed attempt — which
+   landed in the create stage — gets re-published). A reused lead the advisor
+   already advanced past the target is left in place; a lead whose stage is off
+   the sort map (an unknown stage, or one in another pipeline) is also left in
+   place and logs a warning;
 4. return the lead id.
 
 Any CRM error propagates (never swallowed) so the caller skips the flag/phase flip
@@ -28,12 +31,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+import structlog
+
 from app.crm.kommo_crm import KommoContactMatch
 from app.crm.lead_payload import build_custom_fields_values
 from app.domain.concepts import SLOT_CONCEPTS, Concept
 from app.domain.handoff_note import compose_handoff_note
 from app.domain.models import HandoffReason
 from app.understanding.schemas import escape_slot_names
+
+log = structlog.get_logger()
 
 _WHATSAPP_PREFIX = "whatsapp:"
 
@@ -68,7 +75,7 @@ class HandoffMapping:
     concept_field_ids: Mapping[Concept, int]
     reason_status_ids: Mapping[HandoffReason, int]
     pipeline_id: int
-    incoming_status_id: int
+    status_sort: Mapping[int, int]
 
 
 def phone_from_sender(sender: str) -> str:
@@ -103,7 +110,7 @@ class HandoffRunner:
             concept_field_ids=self._mapping.concept_field_ids,
             escape_slots=escape_slot_names(),
         )
-        if await self._should_move_stage(is_new, lead_id):
+        if await self._should_move_stage(is_new, lead_id, reason):
             await self._client.update_lead(
                 lead_id,
                 custom_fields_values=custom_fields_values,
@@ -127,9 +134,35 @@ class HandoffRunner:
         )
         return new_id, True
 
-    async def _should_move_stage(self, is_new: bool, lead_id: int) -> bool:
-        """Move a new lead, or a reused one still unpublished in "Incoming leads"."""
+    async def _should_move_stage(
+        self, is_new: bool, lead_id: int, reason: HandoffReason
+    ) -> bool:
+        """Whether to move a reused lead, by the funnel's stage order (``sort``).
+
+        A new lead always moves. A reused lead moves only FORWARD — when its current
+        stage is at or behind the reason's target stage. If its stage is not in the
+        sort map (an unknown stage, or a lead living in another pipeline), the
+        advisor is assumed to own it: leave it in place and log a warning (for Top
+        Viajes only the handoff pipeline is used, so this should not happen).
+        """
         if is_new:
             return True
         lead = await self._client.get_lead(lead_id)
-        return lead.get("status_id") == self._mapping.incoming_status_id
+        status_id = lead.get("status_id")
+        current_sort: int | None = None
+        if isinstance(status_id, int):
+            current_sort = self._mapping.status_sort.get(status_id)
+        if current_sort is None:
+            log.warning(
+                "handoff_reused_lead_off_sort_map",
+                lead_id=lead_id,
+                status_id=status_id,
+                pipeline_id=lead.get("pipeline_id"),
+            )
+            return False
+        target_sort = self._mapping.status_sort.get(
+            self._mapping.reason_status_ids[reason]
+        )
+        if target_sort is None:
+            return False  # incomplete mapping (a config bug) -> don't move backward
+        return current_sort <= target_sort
