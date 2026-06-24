@@ -34,6 +34,16 @@ async def _route_to_cruise(store: InMemoryStateStore) -> None:
     await store.save(SENDER, ConversationState(trip_type=TripType.CRUISE))
 
 
+class _FakeHandoffRunner:
+    """No-op handoff runner (these flushes never reach the handoff step)."""
+
+    async def run(self, **kwargs: object) -> int:
+        return 1
+
+
+_HANDOFF_RUNNER = _FakeHandoffRunner()
+
+
 async def _flush(
     redis: FakeAsyncRedis,
     channel: FakeChannel,
@@ -43,7 +53,10 @@ async def _flush(
     config: ConcurrencyConfig,
 ) -> None:
     """Run a flush for SENDER with the test's fixed routing config + corpus."""
-    await flush(redis, channel, llm, store, ROUTING, CORPUS, SENDER, sid, config)
+    await flush(
+        redis, channel, llm, store, ROUTING, CORPUS, _HANDOFF_RUNNER,
+        SENDER, sid, config,
+    )
 
 
 class FakeChannel:

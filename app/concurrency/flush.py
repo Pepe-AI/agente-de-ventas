@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from app.channels.base import Channel
 from app.concurrency import buffer, debounce, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
+from app.domain.handoff_orchestration import HandoffRunner
 from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
 from app.domain.state import StateStore
@@ -46,6 +47,7 @@ def schedule_flush(
     store: StateStore,
     routing: RoutingConfig,
     corpus: str,
+    handoff_runner: HandoffRunner,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -53,7 +55,8 @@ def schedule_flush(
     """Schedule a flush for ``sender`` after the debounce window (non-blocking)."""
     task = asyncio.create_task(
         _flush_after_window(
-            redis, channel, llm, store, routing, corpus, sender, token, config
+            redis, channel, llm, store, routing, corpus, handoff_runner,
+            sender, token, config,
         )
     )
     _background_tasks.add(task)
@@ -67,12 +70,16 @@ async def _flush_after_window(
     store: StateStore,
     routing: RoutingConfig,
     corpus: str,
+    handoff_runner: HandoffRunner,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
     await asyncio.sleep(config.debounce_window_s)
-    await flush(redis, channel, llm, store, routing, corpus, sender, token, config)
+    await flush(
+        redis, channel, llm, store, routing, corpus, handoff_runner,
+        sender, token, config,
+    )
 
 
 async def flush(
@@ -82,6 +89,7 @@ async def flush(
     store: StateStore,
     routing: RoutingConfig,
     corpus: str,
+    handoff_runner: HandoffRunner,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -113,6 +121,7 @@ async def flush(
                 store,
                 routing,
                 corpus,
+                handoff_runner,
             )
         except LLMUnavailableError:
             # Transient LLM outage after retries. handle_message only persists on

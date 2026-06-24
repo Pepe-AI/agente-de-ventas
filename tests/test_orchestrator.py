@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import app.domain.orchestrator as orch
 from app.concurrency.handoff import clear_handoff, is_handed_off
+from app.crm.kommo_crm import KommoCrmError
 from app.domain.models import HandoffReason, IncomingMessage, Referral
 from app.domain.orchestrator import FAREWELL, handle_message
 from app.domain.state import ConversationState, Phase
@@ -57,13 +58,35 @@ async def _load(redis: FakeAsyncRedis) -> ConversationState:
     return state
 
 
+class _FakeHandoffRunner:
+    """No-op handoff runner that succeeds; records each ``run`` call's kwargs."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def run(self, **kwargs: object) -> int:
+        self.calls.append(kwargs)
+        return 1
+
+
+class _FailingHandoffRunner:
+    """A handoff runner whose CRM sequence fails (to test the no-flip path)."""
+
+    async def run(self, **kwargs: object) -> int:
+        raise KommoCrmError("crm down")
+
+
 async def _handle(
-    msg: IncomingMessage, llm: object, redis: FakeAsyncRedis
+    msg: IncomingMessage,
+    llm: object,
+    redis: FakeAsyncRedis,
+    runner: object | None = None,
 ) -> str | None:
     # Conversations here are seeded with a trip_type, so the routing gate is
     # skipped and the schema comes from state; routing uses an empty config.
     return await handle_message(
-        msg, llm, redis, _store_for(redis), _ROUTING, _CORPUS
+        msg, llm, redis, _store_for(redis), _ROUTING, _CORPUS,
+        runner or _FakeHandoffRunner(),
     )
 
 
@@ -72,7 +95,8 @@ async def _route_turn(
 ) -> str | None:
     """A routing pre-phase turn (fresh conversation, no slot data)."""
     return await handle_message(
-        _msg(text), ScriptedLLM(), redis, _store_for(redis), routing, _CORPUS
+        _msg(text), ScriptedLLM(), redis, _store_for(redis), routing, _CORPUS,
+        _FakeHandoffRunner(),
     )
 
 _REQUIRED_NO_BUDGET = {
@@ -654,7 +678,8 @@ async def test_first_message_referral_routes_without_text_keyword() -> None:
     )
 
     reply = await handle_message(
-        msg, ScriptedLLM(), redis, _store_for(redis), _ROUTING, _CORPUS
+        msg, ScriptedLLM(), redis, _store_for(redis), _ROUTING, _CORPUS,
+        _FakeHandoffRunner(),
     )
 
     state = await _load(redis)
@@ -671,6 +696,43 @@ async def test_indeterminate_first_message_asks_disambiguation() -> None:
     state = await _load(redis)
     assert state.trip_type is None  # still not routed
     assert state.last_bot_message == orch._DISAMBIGUATION_QUESTION
+
+
+# --- Handoff wiring (the CRM orchestration runs before the phase/flag flip) ---
+
+
+async def test_handoff_runs_crm_sequence_then_flips() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed(redis, TripType.CRUISE, {"nombre_cliente": "Ana"})
+    runner = _FakeHandoffRunner()
+
+    # An explicit request for a human triggers the handoff this turn.
+    await _handle(_msg("quiero hablar con un asesor"),
+                  ScriptedLLM({"wants_human": True}), redis, runner)
+
+    assert await is_handed_off(redis, SENDER)
+    state = await _load(redis)
+    assert state.phase is Phase.HANDED_OFF
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.HUMAN_REQUESTED
+    assert call["phone"] == "+5215512345678"  # the whatsapp: prefix is stripped
+    assert call["customer_name"] == "Ana"
+
+
+async def test_handoff_crm_failure_does_not_flip_and_propagates() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed(redis, TripType.CRUISE, {"nombre_cliente": "Ana"})
+
+    with pytest.raises(KommoCrmError):
+        await _handle(_msg("quiero un humano"),
+                      ScriptedLLM({"wants_human": True}), redis,
+                      _FailingHandoffRunner())
+
+    # Not handed off -> the next turn can retry; phase stays COLLECTING.
+    assert not await is_handed_off(redis, SENDER)
+    state = await _load(redis)
+    assert state.phase is Phase.COLLECTING
 
 
 async def test_disambiguation_reply_routes_and_starts_flow() -> None:

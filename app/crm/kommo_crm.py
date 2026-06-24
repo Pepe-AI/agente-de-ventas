@@ -151,6 +151,17 @@ class KommoCrmClient:
         result = await self._request("POST", _LEADS_COMPLEX_PATH, json=payload)
         return _first_lead_id(result)
 
+    async def get_lead(self, lead_id: int) -> dict[str, object]:
+        """GET a single lead by id; its ``status_id``/``pipeline_id`` tell its stage.
+
+        Used to read a reused lead's current stage before deciding whether to move
+        it (a contact's embedded leads from a search carry only ``id``, not status).
+        """
+        result = await self._request("GET", f"{_LEADS_PATH}/{lead_id}")
+        if not isinstance(result, dict):
+            raise KommoCrmError("Kommo CRM lead response was not a JSON object")
+        return cast("dict[str, object]", result)
+
     async def update_lead(
         self,
         lead_id: int,

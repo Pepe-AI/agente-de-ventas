@@ -250,6 +250,36 @@ async def test_create_lead_raises_typed_error_on_non_2xx() -> None:
     assert exc_info.value.body == "Bad Request"
 
 
+async def test_get_lead_fetches_single_lead_with_status() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        return httpx.Response(
+            200, json={"id": _LEAD_ID, "status_id": 107559931, "pipeline_id": 13937935}
+        )
+
+    async with _client(handler) as client:
+        lead = await client.get_lead(_LEAD_ID)
+
+    assert lead == {"id": _LEAD_ID, "status_id": 107559931, "pipeline_id": 13937935}
+    req = seen["req"]
+    assert req.method == "GET"
+    assert str(req.url) == f"{_BASE_URL}/api/v4/leads/{_LEAD_ID}"
+    assert req.headers["Authorization"] == f"Bearer {_TOKEN}"
+
+
+async def test_get_lead_raises_typed_error_on_non_2xx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="Not Found")
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoCrmError) as exc_info:
+            await client.get_lead(_LEAD_ID)
+
+    assert exc_info.value.status == 404
+
+
 async def test_update_lead_patches_custom_fields_status_and_pipeline() -> None:
     seen: dict[str, httpx.Request] = {}
 

@@ -24,6 +24,7 @@ import sys
 from app.crm import kommo_mapping_topviajes as mapping
 from app.crm.kommo_crm import KommoCrmClient, KommoCrmError
 from app.crm.lead_payload import build_custom_fields_values
+from app.domain.concepts import SLOT_CONCEPTS
 from app.domain.models import HandoffReason
 from app.understanding.schemas import escape_slot_names
 
@@ -58,7 +59,7 @@ async def _run() -> int:
 
     custom_fields_values = build_custom_fields_values(
         _SAMPLE_SLOTS,
-        slot_concepts=mapping.SLOT_CONCEPTS,
+        slot_concepts=SLOT_CONCEPTS,
         concept_field_ids=mapping.CONCEPT_FIELD_IDS,
         escape_slots=escape_slot_names(),
     )

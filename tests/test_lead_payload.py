@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from app.crm import kommo_mapping_topviajes as m
 from app.crm.lead_payload import build_custom_fields_values
+from app.domain.concepts import SLOT_CONCEPTS, Concept
 from app.domain.models import HandoffReason
 from app.understanding.schemas import TripType, descriptor_for, escape_slot_names
 
@@ -168,28 +169,28 @@ def test_mapping_covers_every_real_schema_slot_or_excludes_it() -> None:
     for trip in TripType:
         for slot in descriptor_for(trip).slots:
             if slot.name in _EXCLUDED_FROM_LEAD:
-                assert slot.name not in m.SLOT_CONCEPTS
+                assert slot.name not in SLOT_CONCEPTS
             else:
-                assert slot.name in m.SLOT_CONCEPTS, slot.name
-                assert m.SLOT_CONCEPTS[slot.name] in m.CONCEPT_FIELD_IDS
+                assert slot.name in SLOT_CONCEPTS, slot.name
+                assert SLOT_CONCEPTS[slot.name] in m.CONCEPT_FIELD_IDS
 
 
 def test_mapping_concept_field_ids_match_the_account() -> None:
     assert m.CONCEPT_FIELD_IDS == {
-        m.Concept.DESTINO: 1112708,
-        m.Concept.FECHA: 1112714,
-        m.Concept.DURACION: 1112716,
-        m.Concept.PASAJEROS: 1112718,
-        m.Concept.INVERSION: 1114102,
-        m.Concept.CIUDAD_SALIDA: 1112720,
-        m.Concept.SERVICIOS: 1112712,
-        m.Concept.NIVEL_HOSPEDAJE: 1112722,
-        m.Concept.VUELOS: 1112724,
-        m.Concept.OCASION: 1112726,
-        m.Concept.DOCUMENTACION: 1112730,
-        m.Concept.CABINAS: 1114110,
-        m.Concept.TIPO_CABINA: 1114112,
-        m.Concept.EXPERIENCIA_CRUCERO: 1114114,
+        Concept.DESTINO: 1112708,
+        Concept.FECHA: 1112714,
+        Concept.DURACION: 1112716,
+        Concept.PASAJEROS: 1112718,
+        Concept.INVERSION: 1114102,
+        Concept.CIUDAD_SALIDA: 1112720,
+        Concept.SERVICIOS: 1112712,
+        Concept.NIVEL_HOSPEDAJE: 1112722,
+        Concept.VUELOS: 1112724,
+        Concept.OCASION: 1112726,
+        Concept.DOCUMENTACION: 1112730,
+        Concept.CABINAS: 1114110,
+        Concept.TIPO_CABINA: 1114112,
+        Concept.EXPERIENCIA_CRUCERO: 1114114,
     }
 
 
@@ -207,7 +208,7 @@ def test_mapping_reason_status_and_pipeline_ids() -> None:
 def test_mapping_destination_escape_has_lower_precedence_than_concrete() -> None:
     # In SLOT_CONCEPTS order, the concrete destination slots must precede the
     # experience escapes so the builder picks the concrete one when both exist.
-    names = list(m.SLOT_CONCEPTS)
+    names = list(SLOT_CONCEPTS)
     assert names.index("paises_europa") < names.index("experiencia_europa")
     assert names.index("destinos_asia") < names.index("experiencia_asia")
 
@@ -222,7 +223,7 @@ def test_topviajes_mapping_builds_a_real_europe_payload() -> None:
     }
     cfv = build_custom_fields_values(
         slots,
-        slot_concepts=m.SLOT_CONCEPTS,
+        slot_concepts=SLOT_CONCEPTS,
         concept_field_ids=m.CONCEPT_FIELD_IDS,
         escape_slots=escape_slot_names(),
     )
@@ -238,7 +239,7 @@ def test_topviajes_mapping_prefixes_real_destination_escape() -> None:
     # destino field is filled from experiencia_asia, flagged as a preference.
     cfv = build_custom_fields_values(
         {"experiencia_asia": "templos y gastronomía"},
-        slot_concepts=m.SLOT_CONCEPTS,
+        slot_concepts=SLOT_CONCEPTS,
         concept_field_ids=m.CONCEPT_FIELD_IDS,
         escape_slots=escape_slot_names(),
     )

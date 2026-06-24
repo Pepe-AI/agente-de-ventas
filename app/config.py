@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # full Settings); the web app's lifespan fail-fast enforces presence at boot.
     kommo_long_lived_token: SecretStr | None = None
 
+    # Kommo CRM API v4 base URL (the account subdomain, e.g.
+    # https://<account>.kommo.com). OPTIONAL like the token; the web app's lifespan
+    # fail-fast enforces presence at boot. Not a secret, so a plain str.
+    kommo_crm_base_url: str | None = None
+
     # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
     # until the client delivers the real campaign copy (G1); when set, a phrase
     # found in the first message routes to that trip type.

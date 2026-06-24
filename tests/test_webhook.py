@@ -24,6 +24,7 @@ from app.main import (
     get_channel,
     get_concurrency_config,
     get_corpus,
+    get_handoff_runner,
     get_llm,
     get_redis,
     get_routing_config,
@@ -94,6 +95,9 @@ def _client_with(channel: FakeChannel) -> TestClient:
     )
     app.dependency_overrides[get_store] = lambda: InMemoryStateStore()
     app.dependency_overrides[get_corpus] = lambda: "CORPUS DE PRUEBA"
+    # The flush never runs here; a placeholder runner avoids building the real CRM
+    # client (which would need token/base_url config).
+    app.dependency_overrides[get_handoff_runner] = lambda: object()
     return TestClient(app)
 
 

@@ -7,40 +7,15 @@ consumes it (``app/crm/lead_payload.py``, the client, the orchestration) is core
 and shared. Keeping the IDs in typed Python — not JSON/env — lets pyright and the
 mapping-integrity test catch a missing concept or a fat-fingered id at check time.
 
-The domain slot names carry a per-trip suffix (``paises_europa`` vs
-``destinos_asia`` vs ``ruta_crucero``), but Kommo has ONE generic field per
-concept, so several slot names collapse onto the same concept. ``SLOT_CONCEPTS``
-is the explicit normalization table (no common stem exists, so a suffix stripper
-would not work). Its ORDER matters: the concrete destination slots are listed
-before the experience escapes so the builder, which keeps the first filled slot
-per concept, prefers a concrete destination over the escape.
+``Concept`` and the slot->concept normalization (``SLOT_CONCEPTS``) are the shared,
+schema-derived grouping and live in the domain (``app.domain.concepts``); only the
+account-specific IDs below are per-client (CRM -> domain, never the reverse).
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
-
+from app.domain.concepts import Concept
 from app.domain.models import HandoffReason
-
-
-class Concept(StrEnum):
-    """A Kommo LEAD custom field, by business concept (account-independent name)."""
-
-    DESTINO = "destino"
-    FECHA = "fecha"
-    DURACION = "duracion"
-    PASAJEROS = "pasajeros"
-    INVERSION = "inversion"
-    CIUDAD_SALIDA = "ciudad_salida"
-    SERVICIOS = "servicios"
-    NIVEL_HOSPEDAJE = "nivel_hospedaje"
-    VUELOS = "vuelos"
-    OCASION = "ocasion"
-    DOCUMENTACION = "documentacion"
-    CABINAS = "cabinas"
-    TIPO_CABINA = "tipo_cabina"
-    EXPERIENCIA_CRUCERO = "experiencia_crucero"
-
 
 # Concept -> Kommo lead custom field id (all type "text"). The native price
 # ("Presupuesto") field is the advisor's and is NOT here; the client's stated
@@ -64,62 +39,14 @@ CONCEPT_FIELD_IDS: dict[Concept, int] = {
 }
 
 
-# Domain slot name -> concept. ORDER IS SIGNIFICANT for DESTINO: concrete
-# destination slots first, experience escapes last (the builder keeps the first
-# filled slot per concept). ``nombre_cliente`` is absent on purpose — it is set on
-# the contact by create_lead, never a lead custom field.
-SLOT_CONCEPTS: dict[str, Concept] = {
-    # destino — concrete first, escapes last (precedence)
-    "ruta_crucero": Concept.DESTINO,
-    "paises_europa": Concept.DESTINO,
-    "destinos_asia": Concept.DESTINO,
-    "experiencia_europa": Concept.DESTINO,  # escape
-    "experiencia_asia": Concept.DESTINO,  # escape
-    # fecha / temporada
-    "fechas_crucero": Concept.FECHA,
-    "fechas_europa": Concept.FECHA,
-    "fechas_asia": Concept.FECHA,
-    # duración (no cruise slot)
-    "duracion_europa": Concept.DURACION,
-    "duracion_asia": Concept.DURACION,
-    # pasajeros (Passengers sub-model)
-    "pasajeros_crucero": Concept.PASAJEROS,
-    "pasajeros_europa": Concept.PASAJEROS,
-    "pasajeros_asia": Concept.PASAJEROS,
-    # inversión / presupuesto del cliente (Budget sub-model)
-    "presupuesto_crucero": Concept.INVERSION,
-    "presupuesto_europa": Concept.INVERSION,
-    "presupuesto_asia": Concept.INVERSION,
-    # ciudad de salida
-    "ciudad_salida_crucero": Concept.CIUDAD_SALIDA,
-    "ciudad_salida_europa": Concept.CIUDAD_SALIDA,
-    "ciudad_salida_asia": Concept.CIUDAD_SALIDA,
-    # servicios adicionales
-    "servicios_crucero": Concept.SERVICIOS,
-    "servicios_europa": Concept.SERVICIOS,
-    "servicios_asia": Concept.SERVICIOS,
-    # nivel de hospedaje (no cruise slot)
-    "nivel_hospedaje_europa": Concept.NIVEL_HOSPEDAJE,
-    "nivel_hospedaje_asia": Concept.NIVEL_HOSPEDAJE,
-    # vuelos (no cruise slot)
-    "vuelos_europa": Concept.VUELOS,
-    "vuelos_asia": Concept.VUELOS,
-    # ocasión / motivo del viaje (no cruise slot)
-    "ocasion_europa": Concept.OCASION,
-    "ocasion_asia": Concept.OCASION,
-    # documentación / pasaporte
-    "pasaporte_crucero": Concept.DOCUMENTACION,
-    "pasaporte_europa": Concept.DOCUMENTACION,
-    "pasaporte_asia": Concept.DOCUMENTACION,
-    # cruise-only fields (dedicated Kommo fields created for Top Viajes)
-    "cabinas_crucero": Concept.CABINAS,
-    "tipo_cabina": Concept.TIPO_CABINA,
-    "experiencia_crucero": Concept.EXPERIENCIA_CRUCERO,
-}
-
-
 # Pipeline "Embudo de ventas" and the stage a handoff moves the lead to.
 PIPELINE_ID = 13937935
+
+# First stage "Incoming leads" of PIPELINE_ID: where a lead created without an
+# explicit status lands. A REUSED lead still sitting here is treated as new
+# (unpublished) and gets moved; a reused lead in any other stage is left where the
+# advisor placed it. (Assumes API-created-without-status leads land here.)
+INCOMING_STATUS_ID = 107559931
 
 # Handoff reason -> status_id (stage) within PIPELINE_ID. atorado and pidió_humano
 # share the "Atención 1 a 1" stage.

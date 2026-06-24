@@ -27,6 +27,7 @@ from app.answering.answerer import answer_question
 from app.concurrency.handoff import set_handoff
 from app.crm.relay import relay_to_human
 from app.domain.completeness import is_satisfied, next_slot_to_ask
+from app.domain.handoff_orchestration import HandoffRunner, phone_from_sender
 from app.domain.models import HandoffEvent, HandoffReason, IncomingMessage
 from app.domain.state import (
     ConversationState,
@@ -86,12 +87,14 @@ async def handle_message(
     store: StateStore,
     routing: RoutingConfig,
     corpus: str,
+    handoff_runner: HandoffRunner,
 ) -> str | None:
     """Run one conversation turn and return the bot's reply (``None`` = silent).
 
     State is the durable source of truth (``store``); ``redis`` carries only the
     handoff fast-path flag. ``routing`` has the campaign pre-fill phrases;
-    ``corpus`` is the answerer's knowledge base.
+    ``corpus`` is the answerer's knowledge base; ``handoff_runner`` executes the
+    CRM handoff sequence (find-or-create + note + fields + stage move).
     """
     state = await store.load(msg.sender) or ConversationState()
 
@@ -104,7 +107,7 @@ async def handle_message(
 
     # Routing pre-phase: a not-yet-routed conversation picks a trip type first.
     if state.trip_type is None:
-        return await _route(redis, store, msg, state, routing)
+        return await _route(redis, store, msg, state, routing, handoff_runner)
 
     trip_type = state.trip_type  # routed: non-None for the rest of the turn
     descriptor = descriptor_for(trip_type)
@@ -121,7 +124,9 @@ async def handle_message(
     if understanding.wants_human:
         reason = HandoffReason.HUMAN_REQUESTED
         farewell = _FAREWELL_BY_REASON[reason]
-        return await _handoff(redis, store, msg, state, reason, farewell, trip_type)
+        return await _handoff(
+            redis, store, msg, state, reason, farewell, trip_type, handoff_runner
+        )
 
     _count_failed_attempt(descriptor, state, understanding)
 
@@ -133,7 +138,9 @@ async def handle_message(
             understanding, llm, corpus, trip_type, state.last_bot_message,
             _FAREWELL_BY_REASON[reason],
         )
-        return await _handoff(redis, store, msg, state, reason, reply, trip_type)
+        return await _handoff(
+            redis, store, msg, state, reason, reply, trip_type, handoff_runner
+        )
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
@@ -150,6 +157,7 @@ async def _route(
     msg: IncomingMessage,
     state: ConversationState,
     routing: RoutingConfig,
+    handoff_runner: HandoffRunner,
 ) -> str:
     """Routing pre-phase: classify the trip type and start the flow, or ask.
 
@@ -167,7 +175,9 @@ async def _route(
     if nxt is None:  # a schema with no askable slots — defensive, not expected
         reason = HandoffReason.COMPLETE
         farewell = _FAREWELL_BY_REASON[reason]
-        return await _handoff(redis, store, msg, state, reason, farewell, trip_type)
+        return await _handoff(
+            redis, store, msg, state, reason, farewell, trip_type, handoff_runner
+        )
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
@@ -245,17 +255,38 @@ async def _handoff(
     reason: HandoffReason,
     reply: str,
     trip_type: TripType,
+    handoff_runner: HandoffRunner,
 ) -> str:
-    """Persist, hand off to a human with ``reason``, and return ``reply``.
+    """Run the CRM handoff, then flip the phase/flag, and return ``reply``.
 
     ``reply`` is the full outgoing message (a farewell, possibly with an answered
-    question prepended).
+    question prepended). Order matters (a half-done lead is worse than no lead):
+
+    1. persist progress first (phase still COLLECTING) so a CRM failure can retry
+       next turn against the complete state without losing this turn's slots;
+    2. run the CRM sequence — it RAISES on any failure, which propagates so the
+       flush apologizes and the handoff retries on the next inbound message;
+    3. only if the CRM succeeded, flip the phase + handoff flag (the point of no
+       return) and relay; the entry short-circuit then keeps the bot silent.
     """
-    state.phase = Phase.HANDED_OFF
-    state.last_asked = None
     state.last_bot_message = reply
     await store.save(msg.sender, state)
 
+    pending = tuple(sorted(state.pending))
+    phone = phone_from_sender(msg.sender)
+    name = state.slots.get("nombre_cliente")
+    customer_name = name if isinstance(name, str) and name.strip() else phone
+    await handoff_runner.run(
+        reason=reason,
+        phone=phone,
+        customer_name=customer_name,
+        slots=state.slots,
+        pending=pending,
+    )
+
+    state.phase = Phase.HANDED_OFF
+    state.last_asked = None
+    await store.save(msg.sender, state)
     await set_handoff(redis, msg.sender)
     await relay_to_human(
         msg,
@@ -263,7 +294,7 @@ async def _handoff(
             reason=reason,
             trip_type=trip_type.value,
             slots=state.slots,
-            pending=tuple(sorted(state.pending)),
+            pending=pending,
         ),
     )
     return reply

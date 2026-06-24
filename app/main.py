@@ -26,9 +26,12 @@ from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
+from app.crm import kommo_mapping_topviajes as kommo_mapping
+from app.crm.kommo_crm import KommoCrmClient
 from app.crm.kommo_inbound import enqueue_inbound
 from app.crm.kommo_signing import KommoHeader, KommoSigner
 from app.crm.relay import relay_to_human
+from app.domain.handoff_orchestration import HandoffMapping, HandoffRunner
 from app.domain.models import IncomingMessage
 from app.domain.state import StateStore
 from app.llm.base import LLM
@@ -69,6 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError("KOMMO_CHANNEL_SECRET must be set to run the web app")
     if settings.kommo_long_lived_token is None:
         raise RuntimeError("KOMMO_LONG_LIVED_TOKEN must be set to run the web app")
+    if settings.kommo_crm_base_url is None:
+        raise RuntimeError("KOMMO_CRM_BASE_URL must be set to run the web app")
     pool = await create_pool(settings.database_url)
     app.state.pool = pool
     try:
@@ -141,6 +146,38 @@ def get_corpus() -> str:
     return load_corpus(get_settings().corpus_path)
 
 
+@lru_cache
+def get_kommo_crm_client() -> KommoCrmClient:
+    """Build the Kommo CRM API client once (Bearer auth, composition root).
+
+    The token + base URL are optional in Settings (to not couple migrate.py), but
+    the lifespan fail-fast guarantees both are set before the web app serves, so a
+    missing value here is a misconfiguration, not a request-time condition.
+    """
+    settings = get_settings()
+    token = settings.kommo_long_lived_token
+    base_url = settings.kommo_crm_base_url
+    if token is None or base_url is None:
+        raise RuntimeError("KOMMO_LONG_LIVED_TOKEN and KOMMO_CRM_BASE_URL must be set")
+    return KommoCrmClient(token.get_secret_value(), base_url)
+
+
+@lru_cache
+def get_handoff_runner() -> HandoffRunner:
+    """Build the handoff runner: CRM client + the per-client funnel mapping.
+
+    The per-client ``kommo_mapping_topviajes`` is imported ONLY here (composition
+    root); the core orchestration receives the mapping injected, never importing it.
+    """
+    mapping = HandoffMapping(
+        concept_field_ids=kommo_mapping.CONCEPT_FIELD_IDS,
+        reason_status_ids=kommo_mapping.REASON_STATUS_IDS,
+        pipeline_id=kommo_mapping.PIPELINE_ID,
+        incoming_status_id=kommo_mapping.INCOMING_STATUS_ID,
+    )
+    return HandoffRunner(get_kommo_crm_client(), mapping)
+
+
 def get_kommo_signer() -> KommoSigner:
     """Build the Kommo signer from the channel secret (composition root).
 
@@ -187,6 +224,7 @@ async def whatsapp_webhook(
     store: Annotated[StateStore, Depends(get_store)],
     routing: Annotated[RoutingConfig, Depends(get_routing_config)],
     corpus: Annotated[str, Depends(get_corpus)],
+    handoff_runner: Annotated[HandoffRunner, Depends(get_handoff_runner)],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
     # Twilio posts urlencoded fields; keep only str values (drop any uploads).
@@ -239,7 +277,8 @@ async def whatsapp_webhook(
     # 5. Register debounce token and schedule the background flush.
     await debounce.set_token(redis, sender, msg.message_id)
     schedule_flush(
-        redis, channel, llm, store, routing, corpus, sender, msg.message_id, config
+        redis, channel, llm, store, routing, corpus, handoff_runner,
+        sender, msg.message_id, config,
     )
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)
