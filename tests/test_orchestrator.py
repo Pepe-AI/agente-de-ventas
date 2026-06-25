@@ -204,11 +204,8 @@ async def test_state_and_asked_persist_between_turns() -> None:
     assert state.asked == {"ruta_crucero"}
 
 
-async def test_happy_path_asks_every_slot_in_order_then_hands_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_happy_path_asks_every_slot_in_order_then_hands_off() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(redis, TripType.CRUISE, {})  # already routed
     descriptor = descriptor_for(TripType.CRUISE)
@@ -220,7 +217,7 @@ async def test_happy_path_asks_every_slot_in_order_then_hands_off(
     llm = ScriptedLLM(*presets)
 
     replies = [
-        await _handle(_msg("..."), llm, redis)
+        await _handle(_msg("..."), llm, redis, runner)
         for _ in range(len(askable) + 1)
     ]
 
@@ -230,10 +227,11 @@ async def test_happy_path_asks_every_slot_in_order_then_hands_off(
     assert _prompt_of(TripType.CRUISE, "experiencia_crucero") in replies
     assert replies[-1] == FAREWELL
     assert await is_handed_off(redis, SENDER)
-    # Optionals were captured and ride along in the handoff event.
-    event = relay.await_args.args[1]
-    assert event.reason is HandoffReason.COMPLETE
-    assert "cabinas_crucero" in event.slots
+    # The CRM handoff ran once, carrying the captured slots (incl. optionals).
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.COMPLETE
+    assert "cabinas_crucero" in call["slots"]
 
 
 async def test_experiencia_crucero_is_asked_as_a_step() -> None:
@@ -274,11 +272,8 @@ async def test_optional_asked_once_then_skipped_even_if_unanswered() -> None:
     assert "cabinas_crucero" in state.asked
 
 
-async def test_completion_waits_until_optionals_asked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_completion_waits_until_optionals_asked() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     # All requireds satisfied, but no optional asked yet.
     await _seed(
@@ -287,23 +282,20 @@ async def test_completion_waits_until_optionals_asked(
     llm = ScriptedLLM({})
 
     reply = await _handle(
-        _msg("ok"), llm, redis
+        _msg("ok"), llm, redis, runner
     )
 
     # Requireds done is not enough: it asks an optional, no handoff yet.
     assert reply == _prompt_of(TripType.CRUISE, "cabinas_crucero")
     assert reply != FAREWELL
     assert not await is_handed_off(redis, SENDER)
-    relay.assert_not_awaited()
+    assert runner.calls == []  # no handoff was run
 
 
 # --- Budget escape ----------------------------------------------------------
 
 
-async def test_budget_defer_to_advisor_satisfies_requirement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(orch, "relay_to_human", AsyncMock())
+async def test_budget_defer_to_advisor_satisfies_requirement() -> None:
     redis = FakeAsyncRedis(decode_responses=True)
     # Requireds-minus-budget done; all askable optionals already asked.
     await _seed(
@@ -434,11 +426,8 @@ async def test_out_of_order_answer_is_accumulated_and_slot_skipped() -> None:
 # --- Completion / handoff ---------------------------------------------------
 
 
-async def test_completion_hands_off_and_relays_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_completion_hands_off_and_runs_crm_handoff() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -450,18 +439,18 @@ async def test_completion_hands_off_and_relays_event(
     llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000-3000 USD")})
 
     reply = await _handle(
-        _msg("entre 2000 y 3000"), llm, redis
+        _msg("entre 2000 y 3000"), llm, redis, runner
     )
 
     assert reply == FAREWELL
     # Handoff flag set: the bot stays silent afterwards.
     assert await is_handed_off(redis, SENDER)
-    # The relay stub got the handoff event with reason/trip/slots.
-    relay.assert_awaited_once()
-    event = relay.await_args.args[1]
-    assert event.reason is HandoffReason.COMPLETE
-    assert event.trip_type == TripType.CRUISE.value
-    assert event.slots["nombre_cliente"] == "Ana"
+    # The CRM handoff ran once, with the right reason, captured slots and name.
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.COMPLETE
+    assert call["slots"]["nombre_cliente"] == "Ana"
+    assert call["customer_name"] == "Ana"
     # State recorded as completed.
     state = await _load(redis)
     assert state.phase is Phase.HANDED_OFF
@@ -504,26 +493,25 @@ async def _seed_only_budget_left(
     )
 
 
-async def test_three_unusable_answers_mark_pending_and_hand_off_atorado(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_three_unusable_answers_mark_pending_and_hand_off_atorado() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed_only_budget_left(redis)
     llm = ScriptedLLM({}, {}, {})  # three genuinely unusable turns
 
-    await _handle(_msg("no sé"), llm, redis)
-    await _handle(_msg("mmm"), llm, redis)
-    reply = await _handle(_msg("ni idea"), llm, redis)
+    await _handle(_msg("no sé"), llm, redis, runner)
+    await _handle(_msg("mmm"), llm, redis, runner)
+    reply = await _handle(_msg("ni idea"), llm, redis, runner)
 
     # 3rd failure -> slot given up on -> stuck handoff carrying the pending slot.
     assert reply == orch._FAREWELL_BY_REASON[HandoffReason.STUCK]
     assert await is_handed_off(redis, SENDER)
-    event = relay.await_args.args[1]
-    assert event.reason is HandoffReason.STUCK
-    assert "presupuesto_crucero" in event.pending
-    assert event.slots["nombre_cliente"] == "Ana"
+    # Only the 3rd turn hands off; the CRM runs once with the pending slot.
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.STUCK
+    assert "presupuesto_crucero" in call["pending"]
+    assert call["slots"]["nombre_cliente"] == "Ana"
 
 
 async def test_attempts_persist_between_turns() -> None:
@@ -573,25 +561,23 @@ async def test_out_of_order_data_does_not_count_attempt() -> None:
     assert state.attempts == {}  # data for another slot is not a failed attempt
 
 
-async def test_valid_value_after_failure_satisfies_without_pending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_valid_value_after_failure_satisfies_without_pending() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     # Two prior failures already recorded for budget.
     await _seed_only_budget_left(redis, attempts={"presupuesto_crucero": 2})
     llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2500 USD")})
 
     reply = await _handle(
-        _msg("unos 2500"), llm, redis
+        _msg("unos 2500"), llm, redis, runner
     )
 
     # The value lands -> satisfied -> complete, never pending.
     assert reply == FAREWELL
-    event = relay.await_args.args[1]
-    assert event.reason is HandoffReason.COMPLETE
-    assert event.pending == ()
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.COMPLETE
+    assert call["pending"] == ()
     state = await _load(redis)
     assert state.pending == set()
 
@@ -613,11 +599,8 @@ async def test_reask_after_failure_is_reformulated_not_literal() -> None:
 # --- pidió_humano (immediate) ----------------------------------------------
 
 
-async def test_wants_human_hands_off_immediately(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_wants_human_hands_off_immediately() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -628,17 +611,17 @@ async def test_wants_human_hands_off_immediately(
     llm = ScriptedLLM({"wants_human": True})
 
     reply = await _handle(
-        _msg("mejor quiero hablar con una persona"),
-        llm,
-        redis,    )
+        _msg("mejor quiero hablar con una persona"), llm, redis, runner
+    )
 
     assert reply == orch._FAREWELL_BY_REASON[HandoffReason.HUMAN_REQUESTED]
     assert await is_handed_off(redis, SENDER)
-    event = relay.await_args.args[1]
-    assert event.reason is HandoffReason.HUMAN_REQUESTED
+    assert len(runner.calls) == 1
+    call = runner.calls[0]
+    assert call["reason"] is HandoffReason.HUMAN_REQUESTED
     # Carries what was captured so far.
-    assert event.slots["nombre_cliente"] == "Ana"
-    assert event.slots["ruta_crucero"] == "Caribe"
+    assert call["slots"]["nombre_cliente"] == "Ana"
+    assert call["slots"]["ruta_crucero"] == "Caribe"
 
 
 # --- Campaign routing (4c) -------------------------------------------------
@@ -841,7 +824,6 @@ async def test_out_of_corpus_question_defer_text_is_included(
 async def test_question_on_completing_turn_answers_then_farewell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(orch, "relay_to_human", AsyncMock())
     monkeypatch.setattr(
         orch, "answer_question", AsyncMock(return_value="Aceptamos transferencia.")
     )
@@ -874,7 +856,6 @@ async def test_wants_human_skips_answerer_even_with_question(
 ) -> None:
     answerer = AsyncMock()
     monkeypatch.setattr(orch, "answer_question", answerer)
-    monkeypatch.setattr(orch, "relay_to_human", AsyncMock())
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -944,31 +925,27 @@ async def test_last_bot_message_stores_full_message_for_followups(
 
 
 async def _assert_silent_after_flag_loss(
-    redis: FakeAsyncRedis, relay: AsyncMock
+    redis: FakeAsyncRedis, runner: _FakeHandoffRunner
 ) -> None:
     """After a real handoff (turn 1), simulate a lost Redis flag and assert the
     durable backstop keeps the bot silent on the next message."""
-    # The handoff really happened on turn 1.
-    relay.assert_awaited_once()
+    # The CRM handoff really ran on turn 1.
+    assert len(runner.calls) == 1
     # Simulate a Redis restart that lost the fast-path flag.
     await clear_handoff(redis, SENDER)
     assert not await is_handed_off(redis, SENDER)
-    relay.reset_mock()
 
     # Turn 2: any message. A fresh ScriptedLLM has no turns, so reaching
     # understanding would raise — proving the backstop returns before it.
-    reply = await _handle(_msg("¿siguen ahí?"), ScriptedLLM(), redis)
+    reply = await _handle(_msg("¿siguen ahí?"), ScriptedLLM(), redis, runner)
 
     assert reply is None  # silent: nothing is sent
-    relay.assert_not_awaited()  # NOT relayed again
+    assert len(runner.calls) == 1  # NOT handed off again
     assert await is_handed_off(redis, SENDER)  # backstop restored the flag
 
 
-async def test_handoff_completa_is_idempotent_after_flag_loss(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_handoff_completa_is_idempotent_after_flag_loss() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -979,34 +956,28 @@ async def test_handoff_completa_is_idempotent_after_flag_loss(
     )
     # Turn 1: fill the last required slot -> `completa` handoff (driven, not seeded).
     llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000-3000 USD")})
-    farewell = await _handle(_msg("entre 2000 y 3000"), llm, redis)
+    farewell = await _handle(_msg("entre 2000 y 3000"), llm, redis, runner)
     assert farewell == FAREWELL
 
-    await _assert_silent_after_flag_loss(redis, relay)
+    await _assert_silent_after_flag_loss(redis, runner)
 
 
-async def test_handoff_atorado_is_idempotent_after_flag_loss(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_handoff_atorado_is_idempotent_after_flag_loss() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed_only_budget_left(redis)
     # Turns 1-3: three unusable answers -> 3rd gives up -> `atorado` handoff.
     llm = ScriptedLLM({}, {}, {})
-    await _handle(_msg("no sé"), llm, redis)
-    await _handle(_msg("mmm"), llm, redis)
-    farewell = await _handle(_msg("ni idea"), llm, redis)
+    await _handle(_msg("no sé"), llm, redis, runner)
+    await _handle(_msg("mmm"), llm, redis, runner)
+    farewell = await _handle(_msg("ni idea"), llm, redis, runner)
     assert farewell == orch._FAREWELL_BY_REASON[HandoffReason.STUCK]
 
-    await _assert_silent_after_flag_loss(redis, relay)
+    await _assert_silent_after_flag_loss(redis, runner)
 
 
-async def test_handoff_pidio_humano_is_idempotent_after_flag_loss(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    relay = AsyncMock()
-    monkeypatch.setattr(orch, "relay_to_human", relay)
+async def test_handoff_pidio_humano_is_idempotent_after_flag_loss() -> None:
+    runner = _FakeHandoffRunner()
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -1016,7 +987,7 @@ async def test_handoff_pidio_humano_is_idempotent_after_flag_loss(
     )
     # Turn 1: the user asks for a human -> `pidió_humano` handoff.
     llm = ScriptedLLM({"wants_human": True})
-    farewell = await _handle(_msg("mejor con un humano"), llm, redis)
+    farewell = await _handle(_msg("mejor con un humano"), llm, redis, runner)
     assert farewell == orch._FAREWELL_BY_REASON[HandoffReason.HUMAN_REQUESTED]
 
-    await _assert_silent_after_flag_loss(redis, relay)
+    await _assert_silent_after_flag_loss(redis, runner)

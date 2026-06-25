@@ -25,10 +25,9 @@ from redis.asyncio import Redis
 
 from app.answering.answerer import answer_question
 from app.concurrency.handoff import set_handoff
-from app.crm.relay import relay_to_human
 from app.domain.completeness import is_satisfied, next_slot_to_ask
 from app.domain.handoff_orchestration import HandoffRunner, phone_from_sender
-from app.domain.models import HandoffEvent, HandoffReason, IncomingMessage
+from app.domain.models import HandoffReason, IncomingMessage
 from app.domain.state import (
     ConversationState,
     Phase,
@@ -125,7 +124,7 @@ async def handle_message(
         reason = HandoffReason.HUMAN_REQUESTED
         farewell = _FAREWELL_BY_REASON[reason]
         return await _handoff(
-            redis, store, msg, state, reason, farewell, trip_type, handoff_runner
+            redis, store, msg, state, reason, farewell, handoff_runner
         )
 
     _count_failed_attempt(descriptor, state, understanding)
@@ -139,7 +138,7 @@ async def handle_message(
             _FAREWELL_BY_REASON[reason],
         )
         return await _handoff(
-            redis, store, msg, state, reason, reply, trip_type, handoff_runner
+            redis, store, msg, state, reason, reply, handoff_runner
         )
 
     state.asked.add(nxt.name)
@@ -176,7 +175,7 @@ async def _route(
         reason = HandoffReason.COMPLETE
         farewell = _FAREWELL_BY_REASON[reason]
         return await _handoff(
-            redis, store, msg, state, reason, farewell, trip_type, handoff_runner
+            redis, store, msg, state, reason, farewell, handoff_runner
         )
 
     state.asked.add(nxt.name)
@@ -254,7 +253,6 @@ async def _handoff(
     state: ConversationState,
     reason: HandoffReason,
     reply: str,
-    trip_type: TripType,
     handoff_runner: HandoffRunner,
 ) -> str:
     """Run the CRM handoff, then flip the phase/flag, and return ``reply``.
@@ -267,7 +265,7 @@ async def _handoff(
     2. run the CRM sequence — it RAISES on any failure, which propagates so the
        flush apologizes and the handoff retries on the next inbound message;
     3. only if the CRM succeeded, flip the phase + handoff flag (the point of no
-       return) and relay; the entry short-circuit then keeps the bot silent.
+       return); the entry short-circuit then keeps the bot silent.
     """
     state.last_bot_message = reply
     await store.save(msg.sender, state)
@@ -288,13 +286,4 @@ async def _handoff(
     state.last_asked = None
     await store.save(msg.sender, state)
     await set_handoff(redis, msg.sender)
-    await relay_to_human(
-        msg,
-        HandoffEvent(
-            reason=reason,
-            trip_type=trip_type.value,
-            slots=state.slots,
-            pending=pending,
-        ),
-    )
     return reply
