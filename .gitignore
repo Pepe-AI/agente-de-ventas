@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Local audit files (any extension) — not part of the repo
+auditoria_topviajes*
