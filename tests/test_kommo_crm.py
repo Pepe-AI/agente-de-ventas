@@ -168,11 +168,12 @@ async def test_create_lead_resolves_phone_field_then_posts_complex() -> None:
         return httpx.Response(200, json=[{"id": 999, "contact_id": 555}])
 
     async with _client(handler) as client:
-        lead_id = await client.create_lead_with_contact(
+        result = await client.create_lead_with_contact(
             "Lead X", "Cliente Y", "+5215512345678"
         )
 
-    assert lead_id == 999
+    assert result.lead_id == 999
+    assert result.contact_id == 555  # read from the same complex response
     # The phone field id was looked up by code, then used in the complex payload.
     complex_req = next(
         r for r in requests if r.url.path == "/api/v4/leads/complex"
@@ -210,7 +211,7 @@ async def test_create_lead_caches_phone_field_id_across_calls() -> None:
                 200,
                 json={"_embedded": {"custom_fields": [{"id": 7, "code": "PHONE"}]}},
             )
-        return httpx.Response(200, json=[{"id": 1}])
+        return httpx.Response(200, json=[{"id": 1, "contact_id": 2}])
 
     async with _client(handler) as client:
         await client.create_lead_with_contact("L1", "C1", "+111")
@@ -226,7 +227,7 @@ async def test_create_lead_raises_when_phone_field_missing() -> None:
                 200,
                 json={"_embedded": {"custom_fields": [{"id": 5, "code": "POSITION"}]}},
             )
-        return httpx.Response(200, json=[{"id": 1}])
+        return httpx.Response(200, json=[{"id": 1, "contact_id": 2}])
 
     async with _client(handler) as client:
         with pytest.raises(KommoCrmError, match="PHONE"):

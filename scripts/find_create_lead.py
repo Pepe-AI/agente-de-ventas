@@ -38,7 +38,7 @@ async def _run() -> int:
         try:
             matches = await client.find_contact_by_phone(phone)
             print(f"matches for {phone}: {matches}")
-            lead_id = await client.create_lead_with_contact(
+            created = await client.create_lead_with_contact(
                 lead_name, contact_name, phone
             )
         except KommoCrmError as exc:
@@ -48,7 +48,7 @@ async def _run() -> int:
             )
             return 1
 
-    print(f"created lead_id={lead_id}")
+    print(f"created lead_id={created.lead_id} contact_id={created.contact_id}")
     return 0
 
 

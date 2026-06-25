@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import app.domain.orchestrator as orch
 from app.concurrency.handoff import clear_handoff, is_handed_off
 from app.crm.kommo_crm import KommoCrmError
+from app.domain.handoff_orchestration import HandoffResult
 from app.domain.models import HandoffReason, IncomingMessage, Referral
 from app.domain.orchestrator import FAREWELL, handle_message
 from app.domain.state import ConversationState, Phase
@@ -64,9 +65,9 @@ class _FakeHandoffRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def run(self, **kwargs: object) -> int:
+    async def run(self, **kwargs: object) -> HandoffResult:
         self.calls.append(kwargs)
-        return 1
+        return HandoffResult(lead_id=1, contact_id=1)
 
 
 class _FailingHandoffRunner:

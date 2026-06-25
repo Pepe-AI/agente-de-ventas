@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from structlog.testing import capture_logs
 
-from app.crm.kommo_crm import KommoContactMatch, KommoCrmError
+from app.crm.kommo_crm import KommoContactMatch, KommoCreatedLead, KommoCrmError
 from app.domain.concepts import Concept
 from app.domain.handoff_orchestration import (
     HandoffMapping,
@@ -66,9 +66,9 @@ def test_phone_from_sender_strips_whatsapp_prefix() -> None:
 async def test_new_lead_creates_writes_note_fields_and_moves_stage() -> None:
     client = AsyncMock()
     client.find_contact_by_phone.return_value = []  # no contact -> create
-    client.create_lead_with_contact.return_value = 999
+    client.create_lead_with_contact.return_value = KommoCreatedLead(999, 888)
 
-    lead_id = await _runner(client).run(
+    result = await _runner(client).run(
         reason=HandoffReason.COMPLETE,
         phone="+5215500",
         customer_name="Ana",
@@ -76,7 +76,8 @@ async def test_new_lead_creates_writes_note_fields_and_moves_stage() -> None:
         pending=(),
     )
 
-    assert lead_id == 999
+    assert result.lead_id == 999
+    assert result.contact_id == 888  # both ids come from the same create response
     client.create_lead_with_contact.assert_awaited_once_with("Ana", "Ana", "+5215500")
     client.get_lead.assert_not_awaited()  # new lead: no status read needed
     client.add_note.assert_awaited_once()
@@ -89,7 +90,7 @@ async def test_new_lead_creates_writes_note_fields_and_moves_stage() -> None:
 async def test_note_is_written_before_the_publishing_update() -> None:
     client = AsyncMock()
     client.find_contact_by_phone.return_value = []
-    client.create_lead_with_contact.return_value = 1
+    client.create_lead_with_contact.return_value = KommoCreatedLead(1, 2)
 
     await _runner(client).run(
         reason=HandoffReason.COMPLETE,
@@ -113,7 +114,7 @@ async def test_reused_lead_behind_target_is_moved_forward() -> None:
     ]
     client.get_lead.return_value = {"id": 12, "status_id": 555}  # Calificado (20)
 
-    lead_id = await _runner(client).run(
+    result = await _runner(client).run(
         reason=HandoffReason.STUCK,
         phone="+1",
         customer_name="X",
@@ -121,7 +122,8 @@ async def test_reused_lead_behind_target_is_moved_forward() -> None:
         pending=["presupuesto_europa"],
     )
 
-    assert lead_id == 12  # the most recent (highest id) across all matches
+    assert result.lead_id == 12  # the most recent (highest id) across all matches
+    assert result.contact_id == 11  # the contact OWNING lead 12, not match 22 (lead 7)
     client.create_lead_with_contact.assert_not_awaited()
     client.get_lead.assert_awaited_once_with(12)
     _, kwargs = client.update_lead.await_args
@@ -240,7 +242,7 @@ async def test_create_failure_propagates_before_note() -> None:
 async def test_add_note_failure_propagates_without_update() -> None:
     client = AsyncMock()
     client.find_contact_by_phone.return_value = []
-    client.create_lead_with_contact.return_value = 1
+    client.create_lead_with_contact.return_value = KommoCreatedLead(1, 2)
     client.add_note.side_effect = KommoCrmError("boom")
 
     with pytest.raises(KommoCrmError):
@@ -257,7 +259,7 @@ async def test_add_note_failure_propagates_without_update() -> None:
 async def test_update_failure_propagates() -> None:
     client = AsyncMock()
     client.find_contact_by_phone.return_value = []
-    client.create_lead_with_contact.return_value = 1
+    client.create_lead_with_contact.return_value = KommoCreatedLead(1, 2)
     client.update_lead.side_effect = KommoCrmError("boom")
 
     with pytest.raises(KommoCrmError):

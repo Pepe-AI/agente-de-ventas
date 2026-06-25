@@ -50,6 +50,18 @@ class KommoContactMatch:
     lead_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class KommoCreatedLead:
+    """A lead created via ``/leads/complex``, with its embedded contact's id.
+
+    Both ids come from the SAME create response (no extra call); exposing the
+    contact id lets a caller later link a Chats API chat to that contact.
+    """
+
+    lead_id: int
+    contact_id: int
+
+
 class KommoCrmError(RuntimeError):
     """A Kommo CRM API call failed (non-2xx status or a network error).
 
@@ -124,10 +136,11 @@ class KommoCrmClient:
 
     async def create_lead_with_contact(
         self, lead_name: str, contact_name: str, phone: str
-    ) -> int:
-        """Create a lead with an embedded contact (phone set); return the lead id.
+    ) -> KommoCreatedLead:
+        """Create a lead with an embedded contact (phone set); return both ids.
 
         The lead lands in the default pipeline/stage — moving it is out of scope.
+        The contact id is read from the same response (the embedded contact).
         """
         phone_field_id = await self._resolve_phone_field_id()
         payload = [
@@ -149,7 +162,7 @@ class KommoCrmClient:
             }
         ]
         result = await self._request("POST", _LEADS_COMPLEX_PATH, json=payload)
-        return _first_lead_id(result)
+        return _first_lead_and_contact(result)
 
     async def get_lead(self, lead_id: int) -> dict[str, object]:
         """GET a single lead by id; its ``status_id``/``pipeline_id`` tell its stage.
@@ -270,11 +283,15 @@ def _lead_ids(contact: object) -> tuple[int, ...]:
     return tuple(ids)
 
 
-def _first_lead_id(result: object) -> int:
+def _first_lead_and_contact(result: object) -> KommoCreatedLead:
     if isinstance(result, list):
         items = cast("list[object]", result)
         if items and isinstance(items[0], dict):
-            lead_id = cast("dict[str, object]", items[0]).get("id")
-            if isinstance(lead_id, int):
-                return lead_id
-    raise KommoCrmError("Kommo CRM complex lead response missing the lead id")
+            item = cast("dict[str, object]", items[0])
+            lead_id = item.get("id")
+            contact_id = item.get("contact_id")
+            if isinstance(lead_id, int) and isinstance(contact_id, int):
+                return KommoCreatedLead(lead_id, contact_id)
+    raise KommoCrmError(
+        "Kommo CRM complex lead response missing the lead or contact id"
+    )

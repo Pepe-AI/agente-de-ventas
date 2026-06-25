@@ -33,7 +33,7 @@ from typing import Protocol
 
 import structlog
 
-from app.crm.kommo_crm import KommoContactMatch
+from app.crm.kommo_crm import KommoContactMatch, KommoCreatedLead
 from app.crm.lead_payload import build_custom_fields_values
 from app.domain.concepts import SLOT_CONCEPTS, Concept
 from app.domain.handoff_note import compose_handoff_note
@@ -52,7 +52,7 @@ class CrmClient(Protocol):
 
     async def create_lead_with_contact(
         self, lead_name: str, contact_name: str, phone: str
-    ) -> int: ...
+    ) -> KommoCreatedLead: ...
 
     async def get_lead(self, lead_id: int) -> dict[str, object]: ...
 
@@ -85,6 +85,19 @@ def phone_from_sender(sender: str) -> str:
     return sender
 
 
+@dataclass(frozen=True, slots=True)
+class HandoffResult:
+    """What a handoff produced: the lead it landed on, and that lead's contact.
+
+    The contact id lets a later step link a Chats API chat to the existing contact
+    (so Kommo does not auto-create a duplicate Incoming lead). The result will grow
+    (e.g. a chat id) — a dataclass extends without breaking positional call sites.
+    """
+
+    lead_id: int
+    contact_id: int
+
+
 class HandoffRunner:
     """Runs the CRM handoff sequence with an injected client + per-client mapping."""
 
@@ -100,9 +113,9 @@ class HandoffRunner:
         customer_name: str,
         slots: dict[str, object],
         pending: Sequence[str],
-    ) -> int:
-        """Execute the handoff against the CRM; return the lead id (raises on error)."""
-        lead_id, is_new = await self._resolve_lead(phone, customer_name)
+    ) -> HandoffResult:
+        """Run the handoff against the CRM; return lead+contact (raises on error)."""
+        lead_id, contact_id, is_new = await self._resolve_lead(phone, customer_name)
         await self._client.add_note(lead_id, compose_handoff_note(reason, pending))
         custom_fields_values = build_custom_fields_values(
             slots,
@@ -121,18 +134,31 @@ class HandoffRunner:
             await self._client.update_lead(
                 lead_id, custom_fields_values=custom_fields_values
             )
-        return lead_id
+        return HandoffResult(lead_id=lead_id, contact_id=contact_id)
 
-    async def _resolve_lead(self, phone: str, customer_name: str) -> tuple[int, bool]:
-        """Reuse the most recent existing lead, else create one. ``True`` if new."""
+    async def _resolve_lead(
+        self, phone: str, customer_name: str
+    ) -> tuple[int, int, bool]:
+        """Reuse the most recent existing lead, else create one.
+
+        Returns ``(lead_id, contact_id, is_new)``. On reuse the contact id is the
+        one OWNING the chosen lead — pick the (lead, contact) pair with the highest
+        lead id, so contact_id matches that lead (not just any contact that shares
+        the phone). On create both ids come from the same create response.
+        """
         matches = await self._client.find_contact_by_phone(phone)
-        lead_ids = [lead_id for match in matches for lead_id in match.lead_ids]
-        if lead_ids:
-            return max(lead_ids), False  # most recent = highest id
-        new_id = await self._client.create_lead_with_contact(
+        pairs = [
+            (lead_id, match.contact_id)
+            for match in matches
+            for lead_id in match.lead_ids
+        ]
+        if pairs:
+            lead_id, contact_id = max(pairs, key=lambda pair: pair[0])
+            return lead_id, contact_id, False  # most recent = highest lead id
+        created = await self._client.create_lead_with_contact(
             customer_name, customer_name, phone
         )
-        return new_id, True
+        return created.lead_id, created.contact_id, True
 
     async def _should_move_stage(
         self, is_new: bool, lead_id: int, reason: HandoffReason
