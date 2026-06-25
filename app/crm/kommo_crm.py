@@ -37,6 +37,7 @@ _LEAD_NOTES_PATH = "/api/v4/leads/notes"
 _LEADS_PATH = "/api/v4/leads"
 _CONTACTS_PATH = "/api/v4/contacts"
 _CONTACTS_CUSTOM_FIELDS_PATH = "/api/v4/contacts/custom_fields"
+_CONTACTS_CHATS_PATH = "/api/v4/contacts/chats"
 _LEADS_COMPLEX_PATH = "/api/v4/leads/complex"
 _NOTE_TYPE_COMMON = "common"  # Kommo's note_type for a plain text note
 _PHONE_FIELD_CODE = "PHONE"  # code of the standard contact phone custom field
@@ -123,6 +124,17 @@ class KommoCrmClient:
             }
         ]
         return await self._request("POST", _LEAD_NOTES_PATH, json=payload)
+
+    async def link_chat_to_contact(self, contact_id: int, chat_id: str) -> object:
+        """Link an existing Chats API chat to a contact (CRM API, Bearer, JSON).
+
+        Linking the chat to the EXISTING contact is what stops Kommo from creating a
+        duplicate Incoming lead. Body is a one-item array. NOTE: this is the CRM
+        subsystem (subdomain, Bearer, no signing) — the chat itself is created on
+        the Chats API (``KommoChatsClient``, HMAC). Don't confuse the two.
+        """
+        payload = [{"contact_id": contact_id, "chat_id": chat_id}]
+        return await self._request("POST", _CONTACTS_CHATS_PATH, json=payload)
 
     async def find_contact_by_phone(self, phone: str) -> list[KommoContactMatch]:
         """Return the contacts matching ``phone``, each with its linked lead ids.

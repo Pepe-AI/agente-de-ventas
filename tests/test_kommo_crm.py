@@ -355,6 +355,42 @@ async def test_update_lead_raises_typed_error_on_non_2xx() -> None:
     assert exc_info.value.body == "Bad Request"
 
 
+async def test_link_chat_to_contact_posts_bearer_json_array() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        return httpx.Response(
+            200,
+            json={"_embedded": {"chats": [{"chat_id": "abc-uuid", "contact_id": 555}]}},
+        )
+
+    async with _client(handler) as client:
+        result = await client.link_chat_to_contact(555, "abc-uuid")
+
+    assert result == {
+        "_embedded": {"chats": [{"chat_id": "abc-uuid", "contact_id": 555}]}
+    }
+    req = seen["req"]
+    assert req.method == "POST"
+    # CRM API (subdomain, Bearer) — NOT the legacy onlinechat host; NO HMAC.
+    assert str(req.url) == f"{_BASE_URL}/api/v4/contacts/chats"
+    assert req.headers["Authorization"] == f"Bearer {_TOKEN}"
+    assert json.loads(req.content) == [{"contact_id": 555, "chat_id": "abc-uuid"}]
+
+
+async def test_link_chat_to_contact_raises_typed_error_on_non_2xx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Bad Request")
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoCrmError) as exc_info:
+            await client.link_chat_to_contact(1, "x")
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.body == "Bad Request"
+
+
 def test_kommo_long_lived_token_is_optional_so_migrate_is_unaffected() -> None:
     # migrate.py builds the full Settings; the token must NOT be required there.
     assert Settings.model_fields["kommo_long_lived_token"].is_required() is False

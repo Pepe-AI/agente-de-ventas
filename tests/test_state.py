@@ -30,6 +30,7 @@ def test_serialization_round_trips() -> None:
         attempts={"presupuesto_crucero": 2},
         pending={"presupuesto_crucero"},
         last_bot_message="¿En qué fechas?",
+        chat_id="chat-uuid-123",
     )
 
     restored = from_payload(to_payload(state))
@@ -69,6 +70,7 @@ def test_from_payload_tolerates_legacy_payload_missing_late_fields() -> None:
     assert state.attempts == {}
     assert state.pending == set()
     assert state.last_bot_message is None
+    assert state.chat_id is None  # B1 field absent in legacy payloads
 
 
 # --- merge_slots ------------------------------------------------------------

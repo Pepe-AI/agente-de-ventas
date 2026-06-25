@@ -59,6 +59,9 @@ class ConversationState:
     pending: set[str] = field(default_factory=_empty_pending)
     # The last message the bot sent, for answering follow-up questions ("¿y eso?").
     last_bot_message: str | None = None
+    # The Chats API chat id linked to the contact at handoff (B1); the key for the
+    # B2 mirror and B3 drain. ``None`` until a chat is connected.
+    chat_id: str | None = None
 
 
 def to_payload(state: ConversationState) -> dict[str, Any]:
@@ -77,6 +80,7 @@ def to_payload(state: ConversationState) -> dict[str, Any]:
         "attempts": state.attempts,
         "pending": sorted(state.pending),
         "last_bot_message": state.last_bot_message,
+        "chat_id": state.chat_id,
     }
 
 
@@ -95,6 +99,7 @@ def from_payload(data: dict[str, Any]) -> ConversationState:
         attempts=data.get("attempts", {}),
         pending=set(data.get("pending", [])),
         last_bot_message=data.get("last_bot_message"),
+        chat_id=data.get("chat_id"),
     )
 
 
