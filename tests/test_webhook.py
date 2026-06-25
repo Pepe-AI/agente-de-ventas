@@ -23,6 +23,7 @@ from app.main import (
     app,
     get_channel,
     get_chat_connector,
+    get_chat_mirror,
     get_concurrency_config,
     get_corpus,
     get_handoff_runner,
@@ -100,6 +101,7 @@ def _client_with(channel: FakeChannel) -> TestClient:
     # client (which would need token/base_url config).
     app.dependency_overrides[get_handoff_runner] = lambda: object()
     app.dependency_overrides[get_chat_connector] = lambda: None
+    app.dependency_overrides[get_chat_mirror] = lambda: None
     return TestClient(app)
 
 

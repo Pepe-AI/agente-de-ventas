@@ -25,14 +25,15 @@ from app.channels.twilio import InvalidPayloadError, TwilioChannel
 from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
+from app.concurrency.mirror import schedule_mirror
 from app.config import HttpHeader, get_settings
 from app.crm import kommo_mapping_topviajes as kommo_mapping
 from app.crm.kommo_chats import KommoChatsClient, KommoChatsError
 from app.crm.kommo_crm import KommoCrmClient
 from app.crm.kommo_inbound import enqueue_inbound
 from app.crm.kommo_signing import KommoHeader, KommoSigner
-from app.crm.relay import relay_to_human
 from app.domain.chat_connection import ChatConnector
+from app.domain.chat_mirror import ChatMirror
 from app.domain.handoff_orchestration import HandoffMapping, HandoffRunner
 from app.domain.models import IncomingMessage
 from app.domain.state import StateStore
@@ -233,6 +234,17 @@ def get_chat_connector(request: Request) -> ChatConnector | None:
     return ChatConnector(get_kommo_chats_client(), get_kommo_crm_client(), scope_id)
 
 
+def get_chat_mirror(request: Request) -> ChatMirror | None:
+    """Build the post-handoff chat mirror from the boot-resolved scope_id.
+
+    ``None`` when the channel is degraded (no scope_id) — the mirror is then skipped.
+    """
+    scope_id: str | None = request.app.state.scope_id
+    if scope_id is None:
+        return None
+    return ChatMirror(get_kommo_chats_client(), scope_id)
+
+
 def get_kommo_signer() -> KommoSigner:
     """Build the Kommo signer from the channel secret (composition root).
 
@@ -283,6 +295,7 @@ async def whatsapp_webhook(
     chat_connector: Annotated[
         ChatConnector | None, Depends(get_chat_connector)
     ],
+    chat_mirror: Annotated[ChatMirror | None, Depends(get_chat_mirror)],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
     # Twilio posts urlencoded fields; keep only str values (drop any uploads).
@@ -312,10 +325,10 @@ async def whatsapp_webhook(
         log.info("duplicate_discard", message_id=msg.message_id)
         return _ack()
 
-    # 2b. Human handoff: bot stays silent; relay to the human and ack only.
+    # 2b. Human handoff: bot stays silent; mirror the message into the Kommo chat.
     if await handoff.is_handed_off(redis, sender):
-        await relay_to_human(msg)
-        log.info("handoff_relay", sender=sender)
+        schedule_mirror(chat_mirror, store, msg)
+        log.info("handoff_mirror_scheduled", sender=sender)
         return _ack()
 
     # 3. Flood: rate-limit and block on threshold.

@@ -20,6 +20,7 @@ from app.main import (
     app,
     get_channel,
     get_chat_connector,
+    get_chat_mirror,
     get_concurrency_config,
     get_corpus,
     get_handoff_runner,
@@ -111,8 +112,9 @@ def _client_with(channel: FakeChannel) -> TestClient:
     # The real runner needs the CRM client (token/base_url); these endpoint tests
     # mock schedule_flush, so a placeholder is enough.
     app.dependency_overrides[get_handoff_runner] = lambda: object()
-    # schedule_flush is mocked in these tests, so the connector is never used.
+    # schedule_flush/schedule_mirror are mocked here, so neither is ever used.
     app.dependency_overrides[get_chat_connector] = lambda: None
+    app.dependency_overrides[get_chat_mirror] = lambda: None
     return TestClient(app)
 
 
@@ -122,18 +124,24 @@ def _clear_overrides() -> Iterator[None]:
     app.dependency_overrides.clear()
 
 
-def test_handed_off_relays_and_stays_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_handed_off_mirrors_and_stays_silent(monkeypatch: pytest.MonkeyPatch) -> None:
     channel = FakeChannel()
-    relay = AsyncMock()
+    mirror_spy = Mock()  # schedule_mirror is fire-and-forget (sync), not awaited
     flush_spy = Mock()
     monkeypatch.setattr(handoff, "is_handed_off", AsyncMock(return_value=True))
-    monkeypatch.setattr(main_module, "relay_to_human", relay)
+    monkeypatch.setattr(main_module, "schedule_mirror", mirror_spy)
     monkeypatch.setattr(main_module, "schedule_flush", flush_spy)
 
     response = _client_with(channel).post(WEBHOOK_PATH, data=VALID_FORM)
 
     assert response.status_code == 200
-    relay.assert_awaited_once()
+    # Post-handoff message is mirrored into the Kommo chat (B2), not relayed via a stub.
+    mirror_spy.assert_called_once()
+    # The parsed inbound message is threaded through to the mirror unchanged.
+    _chat_mirror, _store, sent_msg = mirror_spy.call_args.args
+    assert sent_msg.sender == SENDER
+    assert sent_msg.text == "hola"
+    assert sent_msg.message_id == "SM123"
     # Bot is silent and the inc-2 flow (buffer/debounce/orchestrator) is skipped.
     assert channel.sent == []
     flush_spy.assert_not_called()
@@ -141,14 +149,14 @@ def test_handed_off_relays_and_stays_silent(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_not_handed_off_runs_normal_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     channel = FakeChannel()
-    relay = AsyncMock()
+    mirror_spy = Mock()
     flush_spy = Mock()
-    monkeypatch.setattr(main_module, "relay_to_human", relay)
+    monkeypatch.setattr(main_module, "schedule_mirror", mirror_spy)
     monkeypatch.setattr(main_module, "schedule_flush", flush_spy)
 
     response = _client_with(channel).post(WEBHOOK_PATH, data=VALID_FORM)
 
     assert response.status_code == 200
-    relay.assert_not_awaited()
+    mirror_spy.assert_not_called()
     # The normal inc-2 path schedules the background flush.
     flush_spy.assert_called_once()

@@ -19,22 +19,6 @@ class HandoffReason(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class HandoffEvent:
-    """The payload of a handoff: why, which schema, what was captured, and which
-    required slots are still missing (for the human to follow up on a stuck one).
-
-    Increment 8 maps this to a CRM funnel; for now it is passed to the relay
-    stub. ``trip_type`` is the trip-type value (kept primitive to keep this
-    neutral model free of schema imports).
-    """
-
-    reason: HandoffReason
-    trip_type: str
-    slots: dict[str, object]
-    pending: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class Referral:
     """Click-to-WhatsApp (CTWA) ad referral attached to an inbound message.
 

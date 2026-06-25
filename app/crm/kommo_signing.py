@@ -10,8 +10,8 @@ CRITICAL: always sign/verify the RAW body bytes — never a re-serialized JSON
 The channel secret is INJECTED (constructor); it is never imported from Settings
 nor logged, keeping this module pure and testable. The wiring (a SecretStr
 setting + composition root) and the Chats API client / inbound webhook come next:
-``outbound_headers`` feeds the client (connect / send / status), ``verify`` guards
-the webhook, and ``relay.py`` will be implemented over the client.
+``outbound_headers`` feeds the client (connect / send / status) and ``verify``
+guards the inbound webhook.
 
 Note on Kommo's official example: it compares the raw body against the header
 (instead of the computed signature) with a plain ``==`` (timing-unsafe). We do
