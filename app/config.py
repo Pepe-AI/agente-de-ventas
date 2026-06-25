@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # fail-fast enforces presence at boot. Not a secret, so a plain str.
     kommo_crm_base_url: str | None = None
 
+    # Kommo Chats API ids for OUTBOUND chat connection (B1): the custom channel id,
+    # and the account's amoCRM (amojo) id that connect() uses to derive the scope_id
+    # at boot. OPTIONAL like the rest (not required -> migrate.py keeps working); the
+    # lifespan fail-fast enforces presence, and scope_id is derived (never stored).
+    kommo_channel_id: str | None = None
+    kommo_amojo_id: str | None = None
+
     # Campaign pre-fill phrases for trip-type routing, one per type. PLACEHOLDERS
     # until the client delivers the real campaign copy (G1); when set, a phrase
     # found in the first message routes to that trip type.

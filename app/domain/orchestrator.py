@@ -21,10 +21,13 @@ State is persisted between turns in Redis.
 
 from __future__ import annotations
 
+import structlog
 from redis.asyncio import Redis
 
 from app.answering.answerer import answer_question
 from app.concurrency.handoff import set_handoff
+from app.crm.kommo_chats import KommoChatUser
+from app.domain.chat_connection import ChatConnector
 from app.domain.completeness import is_satisfied, next_slot_to_ask
 from app.domain.handoff_orchestration import HandoffRunner, phone_from_sender
 from app.domain.models import HandoffReason, IncomingMessage
@@ -44,6 +47,8 @@ from app.understanding.schemas import (
     descriptor_for,
     extraction_model_for,
 )
+
+log = structlog.get_logger()
 
 FAREWELL = (
     "¡Gracias! Con esto tengo todo lo necesario. En un momento un asesor "
@@ -87,13 +92,15 @@ async def handle_message(
     routing: RoutingConfig,
     corpus: str,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
 ) -> str | None:
     """Run one conversation turn and return the bot's reply (``None`` = silent).
 
     State is the durable source of truth (``store``); ``redis`` carries only the
     handoff fast-path flag. ``routing`` has the campaign pre-fill phrases;
-    ``corpus`` is the answerer's knowledge base; ``handoff_runner`` executes the
-    CRM handoff sequence (find-or-create + note + fields + stage move).
+    ``corpus`` is the answerer's knowledge base; ``handoff_runner`` executes the CRM
+    handoff sequence; ``chat_connector`` connects the Chats API chat at handoff
+    (``None`` = channel degraded at boot → chat connection skipped).
     """
     state = await store.load(msg.sender) or ConversationState()
 
@@ -106,7 +113,9 @@ async def handle_message(
 
     # Routing pre-phase: a not-yet-routed conversation picks a trip type first.
     if state.trip_type is None:
-        return await _route(redis, store, msg, state, routing, handoff_runner)
+        return await _route(
+            redis, store, msg, state, routing, handoff_runner, chat_connector
+        )
 
     trip_type = state.trip_type  # routed: non-None for the rest of the turn
     descriptor = descriptor_for(trip_type)
@@ -124,7 +133,8 @@ async def handle_message(
         reason = HandoffReason.HUMAN_REQUESTED
         farewell = _FAREWELL_BY_REASON[reason]
         return await _handoff(
-            redis, store, msg, state, reason, farewell, handoff_runner
+            redis, store, msg, state, reason, farewell, handoff_runner,
+            chat_connector,
         )
 
     _count_failed_attempt(descriptor, state, understanding)
@@ -138,7 +148,7 @@ async def handle_message(
             _FAREWELL_BY_REASON[reason],
         )
         return await _handoff(
-            redis, store, msg, state, reason, reply, handoff_runner
+            redis, store, msg, state, reason, reply, handoff_runner, chat_connector
         )
 
     state.asked.add(nxt.name)
@@ -157,6 +167,7 @@ async def _route(
     state: ConversationState,
     routing: RoutingConfig,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
 ) -> str:
     """Routing pre-phase: classify the trip type and start the flow, or ask.
 
@@ -175,7 +186,8 @@ async def _route(
         reason = HandoffReason.COMPLETE
         farewell = _FAREWELL_BY_REASON[reason]
         return await _handoff(
-            redis, store, msg, state, reason, farewell, handoff_runner
+            redis, store, msg, state, reason, farewell, handoff_runner,
+            chat_connector,
         )
 
     state.asked.add(nxt.name)
@@ -254,18 +266,23 @@ async def _handoff(
     reason: HandoffReason,
     reply: str,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
 ) -> str:
-    """Run the CRM handoff, then flip the phase/flag, and return ``reply``.
+    """Run the CRM handoff + connect the chat, then flip the phase/flag; return reply.
 
     ``reply`` is the full outgoing message (a farewell, possibly with an answered
     question prepended). Order matters (a half-done lead is worse than no lead):
 
-    1. persist progress first (phase still COLLECTING) so a CRM failure can retry
-       next turn against the complete state without losing this turn's slots;
-    2. run the CRM sequence — it RAISES on any failure, which propagates so the
-       flush apologizes and the handoff retries on the next inbound message;
-    3. only if the CRM succeeded, flip the phase + handoff flag (the point of no
-       return); the entry short-circuit then keeps the bot silent.
+    1. persist progress first (phase still COLLECTING) so a failure can retry next
+       turn against the complete state without losing this turn's slots;
+    2. run the CRM sequence (lead+contact, note, fields, stage) — RAISES on failure;
+    3. connect the Chats API chat (B1): create it ONCE — gated by ``state.chat_id`` and
+       persisted IMMEDIATELY (between create and link) so a link failure never
+       recreates it — then ALWAYS link it to the contact (idempotent, so a retried
+       turn re-links). A degraded channel (``chat_connector`` None) is skipped with a
+       warning. Any create/link failure RAISES → no flip → retry next turn;
+    4. only if all of the above succeeded, flip the phase + handoff flag (the point of
+       no return); the entry short-circuit then keeps the bot silent.
     """
     state.last_bot_message = reply
     await store.save(msg.sender, state)
@@ -274,13 +291,26 @@ async def _handoff(
     phone = phone_from_sender(msg.sender)
     name = state.slots.get("nombre_cliente")
     customer_name = name if isinstance(name, str) and name.strip() else phone
-    await handoff_runner.run(
+    result = await handoff_runner.run(
         reason=reason,
         phone=phone,
         customer_name=customer_name,
         slots=state.slots,
         pending=pending,
     )
+
+    # B1 chat connection (conversation_id = the customer phone — the deterministic
+    # map key for the B2 mirror / B3 drain).
+    if chat_connector is not None:
+        chat_id = state.chat_id
+        if chat_id is None:
+            user = KommoChatUser(id=f"wa-{phone}", name=customer_name, phone=phone)
+            chat_id = await chat_connector.create_chat(phone, user)  # 1) create
+            state.chat_id = chat_id
+            await store.save(msg.sender, state)  # 2) PERSIST between create and link
+        await chat_connector.link(result.contact_id, chat_id)  # 3) ALWAYS link
+    else:
+        log.warning("handoff_chat_skipped_channel_unavailable", sender=msg.sender)
 
     state.phase = Phase.HANDED_OFF
     state.last_asked = None

@@ -19,6 +19,7 @@ from app.main import (
     WEBHOOK_PATH,
     app,
     get_channel,
+    get_chat_connector,
     get_concurrency_config,
     get_corpus,
     get_handoff_runner,
@@ -110,6 +111,8 @@ def _client_with(channel: FakeChannel) -> TestClient:
     # The real runner needs the CRM client (token/base_url); these endpoint tests
     # mock schedule_flush, so a placeholder is enough.
     app.dependency_overrides[get_handoff_runner] = lambda: object()
+    # schedule_flush is mocked in these tests, so the connector is never used.
+    app.dependency_overrides[get_chat_connector] = lambda: None
     return TestClient(app)
 
 

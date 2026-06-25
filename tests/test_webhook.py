@@ -22,6 +22,7 @@ from app.main import (
     WEBHOOK_PATH,
     app,
     get_channel,
+    get_chat_connector,
     get_concurrency_config,
     get_corpus,
     get_handoff_runner,
@@ -98,6 +99,7 @@ def _client_with(channel: FakeChannel) -> TestClient:
     # The flush never runs here; a placeholder runner avoids building the real CRM
     # client (which would need token/base_url config).
     app.dependency_overrides[get_handoff_runner] = lambda: object()
+    app.dependency_overrides[get_chat_connector] = lambda: None
     return TestClient(app)
 
 

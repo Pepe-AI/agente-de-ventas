@@ -27,10 +27,12 @@ from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
 from app.config import HttpHeader, get_settings
 from app.crm import kommo_mapping_topviajes as kommo_mapping
+from app.crm.kommo_chats import KommoChatsClient, KommoChatsError
 from app.crm.kommo_crm import KommoCrmClient
 from app.crm.kommo_inbound import enqueue_inbound
 from app.crm.kommo_signing import KommoHeader, KommoSigner
 from app.crm.relay import relay_to_human
+from app.domain.chat_connection import ChatConnector
 from app.domain.handoff_orchestration import HandoffMapping, HandoffRunner
 from app.domain.models import IncomingMessage
 from app.domain.state import StateStore
@@ -74,12 +76,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError("KOMMO_LONG_LIVED_TOKEN must be set to run the web app")
     if settings.kommo_crm_base_url is None:
         raise RuntimeError("KOMMO_CRM_BASE_URL must be set to run the web app")
+    if settings.kommo_channel_id is None:
+        raise RuntimeError("KOMMO_CHANNEL_ID must be set to run the web app")
+    if settings.kommo_amojo_id is None:
+        raise RuntimeError("KOMMO_AMOJO_ID must be set to run the web app")
     pool = await create_pool(settings.database_url)
     app.state.pool = pool
+    # Resolve the Chats scope_id at boot (derived, never stored). A connect FAILURE
+    # degrades: the app still serves (the CRM handoff works), only chat connection is
+    # skipped until a restart re-resolves it. See _resolve_scope_id_at_boot.
+    app.state.scope_id = await _resolve_scope_id_at_boot()
     try:
         yield
     finally:
         await pool.close()
+
+
+async def _resolve_scope_id_at_boot() -> str | None:
+    """Connect the Chats channel at boot → scope_id, or ``None`` to degrade.
+
+    A down chat channel must NOT take down the web app: the bot keeps qualifying and
+    the CRM handoff keeps writing lead+note+fields; only the chat connection is
+    skipped. ``None`` here makes ``get_chat_connector`` return ``None`` and ``_handoff``
+    skip (and warn). channel_id/amojo_id presence is guaranteed by the fail-fast above.
+    """
+    amojo_id = get_settings().kommo_amojo_id
+    if amojo_id is None:
+        return None
+    try:
+        scope_id = await get_kommo_chats_client().connect(amojo_id)
+        log.info("kommo_channel_connected", scope_id=scope_id)
+        return scope_id
+    except KommoChatsError as exc:
+        log.warning("kommo_channel_connect_failed", error=str(exc))
+        return None
 
 
 app = FastAPI(title="WhatsApp Echo Agent", lifespan=lifespan)
@@ -163,6 +193,19 @@ def get_kommo_crm_client() -> KommoCrmClient:
 
 
 @lru_cache
+def get_kommo_chats_client() -> KommoChatsClient:
+    """Build the Kommo Chats API client once (HMAC signing, composition root).
+
+    The channel id is optional in Settings (to not couple migrate.py); the lifespan
+    fail-fast guarantees it is set before the web app serves.
+    """
+    settings = get_settings()
+    if settings.kommo_channel_id is None:
+        raise RuntimeError("KOMMO_CHANNEL_ID must be set to run the web app")
+    return KommoChatsClient(get_kommo_signer(), settings.kommo_channel_id)
+
+
+@lru_cache
 def get_handoff_runner() -> HandoffRunner:
     """Build the handoff runner: CRM client + the per-client funnel mapping.
 
@@ -176,6 +219,18 @@ def get_handoff_runner() -> HandoffRunner:
         status_sort=kommo_mapping.STATUS_SORT,
     )
     return HandoffRunner(get_kommo_crm_client(), mapping)
+
+
+def get_chat_connector(request: Request) -> ChatConnector | None:
+    """Build the chat connector from the boot-resolved scope_id (``None`` = degraded).
+
+    ``None`` when the channel failed to connect at boot — ``_handoff`` then skips chat
+    connection (and warns), while the CRM handoff still completes and flips the phase.
+    """
+    scope_id: str | None = request.app.state.scope_id
+    if scope_id is None:
+        return None
+    return ChatConnector(get_kommo_chats_client(), get_kommo_crm_client(), scope_id)
 
 
 def get_kommo_signer() -> KommoSigner:
@@ -225,6 +280,9 @@ async def whatsapp_webhook(
     routing: Annotated[RoutingConfig, Depends(get_routing_config)],
     corpus: Annotated[str, Depends(get_corpus)],
     handoff_runner: Annotated[HandoffRunner, Depends(get_handoff_runner)],
+    chat_connector: Annotated[
+        ChatConnector | None, Depends(get_chat_connector)
+    ],
 ) -> Response:
     """Receive a WhatsApp message: validate, run input checks, fast-ack."""
     # Twilio posts urlencoded fields; keep only str values (drop any uploads).
@@ -278,7 +336,7 @@ async def whatsapp_webhook(
     await debounce.set_token(redis, sender, msg.message_id)
     schedule_flush(
         redis, channel, llm, store, routing, corpus, handoff_runner,
-        sender, msg.message_id, config,
+        chat_connector, sender, msg.message_id, config,
     )
 
     log.info("incoming_buffered", sender=sender, message_id=msg.message_id)

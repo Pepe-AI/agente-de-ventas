@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import app.domain.orchestrator as orch
 from app.concurrency.handoff import clear_handoff, is_handed_off
+from app.crm.kommo_chats import KommoChatsError
 from app.crm.kommo_crm import KommoCrmError
 from app.domain.handoff_orchestration import HandoffResult
 from app.domain.models import HandoffReason, IncomingMessage, Referral
@@ -77,17 +78,36 @@ class _FailingHandoffRunner:
         raise KommoCrmError("crm down")
 
 
+class _FakeChatConnector:
+    """Records create_chat/link calls; returns a fixed chat_id."""
+
+    def __init__(self, chat_id: str = "chat-uuid") -> None:
+        self.chat_id = chat_id
+        self.created: list[tuple[str, object]] = []  # (conversation_id, user)
+        self.links: list[tuple[int, str]] = []
+
+    async def create_chat(self, conversation_id: str, user: object) -> str:
+        self.created.append((conversation_id, user))
+        return self.chat_id
+
+    async def link(self, contact_id: int, chat_id: str) -> None:
+        self.links.append((contact_id, chat_id))
+
+
 async def _handle(
     msg: IncomingMessage,
     llm: object,
     redis: FakeAsyncRedis,
     runner: object | None = None,
+    chat_connector: object | None = None,
 ) -> str | None:
     # Conversations here are seeded with a trip_type, so the routing gate is
     # skipped and the schema comes from state; routing uses an empty config.
+    # chat_connector defaults None (degraded → chat connection skipped) so the
+    # existing handoff tests are unaffected; chat tests pass a _FakeChatConnector.
     return await handle_message(
         msg, llm, redis, _store_for(redis), _ROUTING, _CORPUS,
-        runner or _FakeHandoffRunner(),
+        runner or _FakeHandoffRunner(), chat_connector,
     )
 
 
@@ -97,7 +117,7 @@ async def _route_turn(
     """A routing pre-phase turn (fresh conversation, no slot data)."""
     return await handle_message(
         _msg(text), ScriptedLLM(), redis, _store_for(redis), routing, _CORPUS,
-        _FakeHandoffRunner(),
+        _FakeHandoffRunner(), None,
     )
 
 _REQUIRED_NO_BUDGET = {
@@ -159,6 +179,7 @@ async def _seed(
     attempts: dict[str, int] | None = None,
     pending: set[str] | None = None,
     last_bot_message: str | None = None,
+    chat_id: str | None = None,
 ) -> None:
     state = ConversationState(
         trip_type=trip,
@@ -169,6 +190,7 @@ async def _seed(
         attempts=attempts if attempts is not None else {},
         pending=pending if pending is not None else set(),
         last_bot_message=last_bot_message,
+        chat_id=chat_id,
     )
     await _store_for(redis).save(SENDER, state)
 
@@ -663,7 +685,7 @@ async def test_first_message_referral_routes_without_text_keyword() -> None:
 
     reply = await handle_message(
         msg, ScriptedLLM(), redis, _store_for(redis), _ROUTING, _CORPUS,
-        _FakeHandoffRunner(),
+        _FakeHandoffRunner(), None,
     )
 
     state = await _load(redis)
@@ -992,3 +1014,112 @@ async def test_handoff_pidio_humano_is_idempotent_after_flag_loss() -> None:
     assert farewell == orch._FAREWELL_BY_REASON[HandoffReason.HUMAN_REQUESTED]
 
     await _assert_silent_after_flag_loss(redis, runner)
+
+
+# --- B1 chat connection on handoff -----------------------------------------
+
+_SENDER_PHONE = "+5215512345678"  # phone_from_sender(SENDER)
+
+
+async def _seed_completable(redis: FakeAsyncRedis, chat_id: str | None = None) -> None:
+    """Seed a state one budget answer away from a `completa` handoff."""
+    await _seed(
+        redis,
+        TripType.CRUISE,
+        dict(_REQUIRED_NO_BUDGET),
+        last_asked="presupuesto_crucero",
+        asked=_askable_optionals(TripType.CRUISE),
+        chat_id=chat_id,
+    )
+
+
+class _LinkFailingChatConnector(_FakeChatConnector):
+    async def link(self, contact_id: int, chat_id: str) -> None:
+        raise KommoCrmError("link down")
+
+
+class _CreateFailingChatConnector(_FakeChatConnector):
+    async def create_chat(self, conversation_id: str, user: object) -> str:
+        raise KommoChatsError("create down")
+
+
+async def test_handoff_creates_chat_persists_chat_id_and_links() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    connector = _FakeChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    reply = await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    assert reply == FAREWELL
+    # create_chat once: conversation_id = customer phone, user carries name + phone.
+    assert len(connector.created) == 1
+    conv_id, user = connector.created[0]
+    assert conv_id == _SENDER_PHONE
+    assert user.phone == _SENDER_PHONE  # type: ignore[attr-defined]
+    assert user.name == "Ana"  # type: ignore[attr-defined]
+    # link once, with the runner's contact_id (fake = 1) and the new chat_id.
+    assert connector.links == [(1, "chat-uuid")]
+    state = await _load(redis)
+    assert state.chat_id == "chat-uuid"  # persisted
+    assert state.phase is Phase.HANDED_OFF
+    assert await is_handed_off(redis, SENDER)
+
+
+async def test_handoff_reuses_persisted_chat_id_skips_create_but_relinks() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis, chat_id="existing-chat")
+    connector = _FakeChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    assert connector.created == []  # gated by state.chat_id -> NOT recreated
+    assert connector.links == [(1, "existing-chat")]  # link still runs (idempotent)
+
+
+async def test_handoff_persists_chat_id_before_link() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    connector = _LinkFailingChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    with pytest.raises(KommoCrmError):
+        await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    # The chat_id was persisted BETWEEN create and link, so a retry won't recreate.
+    state = await _load(redis)
+    assert state.chat_id == "chat-uuid"
+    # Link failed before the flip -> not handed off -> the turn retries.
+    assert state.phase is Phase.COLLECTING
+    assert not await is_handed_off(redis, SENDER)
+
+
+async def test_handoff_create_chat_failure_propagates_and_does_not_flip() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    connector = _CreateFailingChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    with pytest.raises(KommoChatsError):
+        await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    state = await _load(redis)
+    assert state.chat_id is None  # nothing created
+    assert state.phase is Phase.COLLECTING  # not flipped -> retriable
+    assert not await is_handed_off(redis, SENDER)
+
+
+async def test_handoff_degraded_channel_skips_chat_but_completes() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    # chat_connector None = channel degraded at boot: chat skipped, handoff still OK.
+    reply = await _handle(_msg("2000"), llm, redis, chat_connector=None)
+
+    assert reply == FAREWELL
+    state = await _load(redis)
+    assert state.chat_id is None
+    assert state.phase is Phase.HANDED_OFF
+    assert await is_handed_off(redis, SENDER)

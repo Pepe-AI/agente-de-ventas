@@ -54,6 +54,19 @@ class KommoChatMessage:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class KommoChatUser:
+    """The chat user (customer) for ``create_chat``: id + name + phone.
+
+    NO avatar — the live-validated create_chat body is ``{conversation_id, user:{id,
+    name, profile:{phone}}}`` and omits it (unlike ``KommoChatSender``).
+    """
+
+    id: str
+    name: str
+    phone: str
+
+
 class KommoChatsError(RuntimeError):
     """A Kommo Chats API call failed (non-200 status or a network error).
 
@@ -141,6 +154,67 @@ class KommoChatsClient:
                 body=response.text,
             )
         return self._parsed_object(response)
+
+    async def create_chat(
+        self, scope_id: str, conversation_id: str, user: KommoChatUser
+    ) -> str:
+        """Create a chat (before any message) and return its ``chat_id``.
+
+        Same transport contract as ``send_message`` (serialize ONCE, sign THOSE
+        bytes, ``content=`` not ``json=``). ``conversation_id`` is OUR-side, required
+        key (Kommo 400s without it) — used as the deterministic map key for the B2
+        mirror / B3 drain. Live-validated: ``chat_id`` is the TOP-LEVEL ``id`` of the
+        response (NOT under ``_embedded``).
+        """
+        body = self._create_chat_body(conversation_id, user)  # serialize ONCE
+        path = f"/v2/origin/custom/{scope_id}/chats"
+        try:
+            response = await self._client.post(
+                path, content=body, headers=self._signer.outbound_headers(body)
+            )
+        except httpx.RequestError as exc:
+            raise KommoChatsError(f"Kommo create_chat request failed: {exc}") from exc
+
+        if not 200 <= response.status_code < 300:
+            raise KommoChatsError(
+                "Kommo create_chat returned a non-2xx status",
+                status=response.status_code,
+                body=response.text,
+            )
+        return self._chat_id_of(response)
+
+    @staticmethod
+    def _create_chat_body(conversation_id: str, user: KommoChatUser) -> bytes:
+        """Serialize the create_chat payload to bytes exactly once."""
+        payload: dict[str, object] = {
+            "conversation_id": conversation_id,
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "profile": {"phone": user.phone},
+            },
+        }
+        return json.dumps(payload).encode("utf-8")
+
+    @staticmethod
+    def _chat_id_of(response: httpx.Response) -> str:
+        try:
+            payload: object = response.json()
+        except ValueError as exc:  # JSONDecodeError
+            raise KommoChatsError(
+                "Kommo create_chat response was not valid JSON",
+                status=response.status_code,
+                body=response.text,
+            ) from exc
+        if isinstance(payload, dict):
+            chat_id = cast("dict[str, object]", payload).get("id")
+            if isinstance(chat_id, str):
+                return chat_id
+        raise KommoChatsError(
+            "Kommo create_chat response missing the chat id (top-level 'id')",
+            status=response.status_code,
+            body=response.text,
+        )
 
     @staticmethod
     def _new_message_body(message: KommoChatMessage) -> bytes:

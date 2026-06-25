@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.concurrency.keys import KeyPrefix, make_key
+from app.crm.kommo_chats import KommoChatsError
 from app.crm.kommo_inbound import enqueue_inbound
 from app.crm.kommo_signing import KommoSigner
 from app.main import app, get_kommo_signer, get_redis
@@ -156,3 +157,43 @@ def test_kommo_secret_is_optional_so_migrate_is_unaffected() -> None:
     from app.config import Settings
 
     assert Settings.model_fields["kommo_channel_secret"].is_required() is False
+
+
+def test_kommo_chat_ids_are_optional_so_migrate_is_unaffected() -> None:
+    # Same invariant for the B1 chat-connection ids: optional in Settings (the
+    # lifespan fail-fast enforces them for the web app only).
+    from app.config import Settings
+
+    assert Settings.model_fields["kommo_channel_id"].is_required() is False
+    assert Settings.model_fields["kommo_amojo_id"].is_required() is False
+
+
+async def test_resolve_scope_id_returns_scope_on_connect_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chats = AsyncMock()
+    chats.connect.return_value = "ch123_acc456"
+    monkeypatch.setattr(main_module, "get_kommo_chats_client", lambda: chats)
+    monkeypatch.setattr(
+        main_module, "get_settings", lambda: SimpleNamespace(kommo_amojo_id="amojo-1")
+    )
+
+    scope_id = await main_module._resolve_scope_id_at_boot()
+
+    assert scope_id == "ch123_acc456"
+    chats.connect.assert_awaited_once_with("amojo-1")
+
+
+async def test_resolve_scope_id_degrades_to_none_on_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A down channel must NOT crash boot: connect failure -> scope_id None (degrade);
+    # the web app still serves and the CRM handoff works, only chat connection skips.
+    chats = AsyncMock()
+    chats.connect.side_effect = KommoChatsError("channel down")
+    monkeypatch.setattr(main_module, "get_kommo_chats_client", lambda: chats)
+    monkeypatch.setattr(
+        main_module, "get_settings", lambda: SimpleNamespace(kommo_amojo_id="amojo-1")
+    )
+
+    assert await main_module._resolve_scope_id_at_boot() is None

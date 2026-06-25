@@ -17,6 +17,7 @@ from app.crm.kommo_chats import (
     KommoChatsClient,
     KommoChatSender,
     KommoChatsError,
+    KommoChatUser,
 )
 from app.crm.kommo_signing import KommoHeader, KommoSigner
 
@@ -167,5 +168,77 @@ async def test_send_message_wraps_network_error_as_typed_error() -> None:
     async with _client(handler) as client:
         with pytest.raises(KommoChatsError) as exc_info:
             await client.send_message(_SCOPE_ID, _MESSAGE)
+
+    assert exc_info.value.status is None
+
+
+# --- create_chat (live-validated body: {conversation_id, user}; chat_id = "id") ---
+
+_CHAT_USER = KommoChatUser(
+    id="wa-+5215512345678", name="Ana", phone="+5215512345678"
+)
+_EXPECTED_CHAT_BODY = {
+    "conversation_id": "+5215512345678",
+    "user": {
+        "id": "wa-+5215512345678",
+        "name": "Ana",
+        "profile": {"phone": "+5215512345678"},
+    },
+}
+_CHAT_UUID = "6cbab3d5-c4c1-46ff-b710-ad59ad10805f"
+
+
+async def test_create_chat_posts_signed_body_and_returns_chat_id() -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["req"] = request
+        # Live-validated: chat_id is the TOP-LEVEL "id" (NOT under _embedded).
+        return httpx.Response(200, json={"id": _CHAT_UUID, "user": {"id": "wa-x"}})
+
+    async with _client(handler) as client:
+        chat_id = await client.create_chat(_SCOPE_ID, "+5215512345678", _CHAT_USER)
+
+    assert chat_id == _CHAT_UUID
+    req = seen["req"]
+    assert req.method == "POST"
+    assert str(req.url) == f"{KOMMO_BASE_URL}/v2/origin/custom/{_SCOPE_ID}/chats"
+    # Body-only HMAC: the signature header matches a fresh sign of the sent bytes.
+    signer = KommoSigner(_SECRET)
+    assert req.headers[KommoHeader.SIGNATURE] == signer.sign(req.content)
+    assert json.loads(req.content) == _EXPECTED_CHAT_BODY
+    assert req.headers[KommoHeader.CONTENT_TYPE] == "application/json"
+    assert KommoHeader.CONTENT_MD5 in req.headers
+    assert KommoHeader.DATE in req.headers
+
+
+async def test_create_chat_raises_typed_error_on_non_2xx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="ConversationId.Required")
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoChatsError) as exc_info:
+            await client.create_chat(_SCOPE_ID, "+1", _CHAT_USER)
+
+    assert exc_info.value.status == 400
+    assert exc_info.value.body == "ConversationId.Required"
+
+
+async def test_create_chat_raises_when_chat_id_missing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"user": {"id": "wa-x"}})  # no top-level id
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoChatsError, match="chat id"):
+            await client.create_chat(_SCOPE_ID, "+1", _CHAT_USER)
+
+
+async def test_create_chat_wraps_network_error_as_typed_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    async with _client(handler) as client:
+        with pytest.raises(KommoChatsError) as exc_info:
+            await client.create_chat(_SCOPE_ID, "+1", _CHAT_USER)
 
     assert exc_info.value.status is None

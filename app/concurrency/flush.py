@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from app.channels.base import Channel
 from app.concurrency import buffer, debounce, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
+from app.domain.chat_connection import ChatConnector
 from app.domain.handoff_orchestration import HandoffRunner
 from app.domain.models import IncomingMessage
 from app.domain.orchestrator import handle_message
@@ -48,6 +49,7 @@ def schedule_flush(
     routing: RoutingConfig,
     corpus: str,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -56,7 +58,7 @@ def schedule_flush(
     task = asyncio.create_task(
         _flush_after_window(
             redis, channel, llm, store, routing, corpus, handoff_runner,
-            sender, token, config,
+            chat_connector, sender, token, config,
         )
     )
     _background_tasks.add(task)
@@ -71,6 +73,7 @@ async def _flush_after_window(
     routing: RoutingConfig,
     corpus: str,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -78,7 +81,7 @@ async def _flush_after_window(
     await asyncio.sleep(config.debounce_window_s)
     await flush(
         redis, channel, llm, store, routing, corpus, handoff_runner,
-        sender, token, config,
+        chat_connector, sender, token, config,
     )
 
 
@@ -90,6 +93,7 @@ async def flush(
     routing: RoutingConfig,
     corpus: str,
     handoff_runner: HandoffRunner,
+    chat_connector: ChatConnector | None,
     sender: str,
     token: str,
     config: ConcurrencyConfig,
@@ -122,6 +126,7 @@ async def flush(
                 routing,
                 corpus,
                 handoff_runner,
+                chat_connector,
             )
         except LLMUnavailableError:
             # Transient LLM outage after retries. handle_message only persists on

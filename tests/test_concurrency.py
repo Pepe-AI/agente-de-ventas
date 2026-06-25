@@ -55,7 +55,7 @@ async def _flush(
     """Run a flush for SENDER with the test's fixed routing config + corpus."""
     await flush(
         redis, channel, llm, store, ROUTING, CORPUS, _HANDOFF_RUNNER,
-        SENDER, sid, config,
+        None, SENDER, sid, config,
     )
 
 
