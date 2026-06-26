@@ -371,6 +371,16 @@ async def kommo_chats_webhook(
     # Raw bytes: never declare a body model, which would consume/re-parse them.
     body = await request.body()
     signature = request.headers.get(KommoHeader.SIGNATURE, "")
+    # TEMP B3 SIGNATURE PROBE — capture ONE real webhook (body + signature + all
+    # headers + path) to diagnose Kommo's inbound signing scheme offline, then REVERT.
+    # Observation only: it does NOT alter verify (the request still 401s below).
+    log.warning(
+        "kommo_sig_PROBE",
+        raw_body=body.decode("utf-8", errors="replace"),
+        incoming_signature=signature,
+        headers=dict(request.headers),
+        path=request.url.path,
+    )
     if not signature or not signer.verify(body, signature):
         log.warning("kommo_invalid_signature", scope_id=scope_id)
         return Response(status_code=401)
