@@ -49,6 +49,7 @@ TEST_CONFIG = ConcurrencyConfig(
     rate_threshold=15,
     block_cooldown_s=600,
     buffer_max=10,
+    inactivity_deadline_s=7200.0,
 )
 
 

@@ -38,6 +38,7 @@ from tests.fakes import InMemoryStateStore
 SENDER = "whatsapp:+5215512345678"
 _CORPUS = "CORPUS DE PRUEBA TOPVIAJES"
 _ROUTING = RoutingConfig(prefill_crucero=None, prefill_europa=None, prefill_asia=None)
+_INACTIVITY_DEADLINE_S = 7200.0  # production default; these tests don't exercise it
 
 # State now lives in a StateStore (not Redis). Each test's redis gets its own
 # in-memory store, so the existing `_seed`/`_handle` call sites stay unchanged.
@@ -107,7 +108,7 @@ async def _handle(
     # existing handoff tests are unaffected; chat tests pass a _FakeChatConnector.
     return await handle_message(
         msg, llm, redis, _store_for(redis), _ROUTING, _CORPUS,
-        runner or _FakeHandoffRunner(), chat_connector,
+        runner or _FakeHandoffRunner(), chat_connector, _INACTIVITY_DEADLINE_S,
     )
 
 
@@ -117,7 +118,7 @@ async def _route_turn(
     """A routing pre-phase turn (fresh conversation, no slot data)."""
     return await handle_message(
         _msg(text), ScriptedLLM(), redis, _store_for(redis), routing, _CORPUS,
-        _FakeHandoffRunner(), None,
+        _FakeHandoffRunner(), None, _INACTIVITY_DEADLINE_S,
     )
 
 _REQUIRED_NO_BUDGET = {
@@ -685,7 +686,7 @@ async def test_first_message_referral_routes_without_text_keyword() -> None:
 
     reply = await handle_message(
         msg, ScriptedLLM(), redis, _store_for(redis), _ROUTING, _CORPUS,
-        _FakeHandoffRunner(), None,
+        _FakeHandoffRunner(), None, _INACTIVITY_DEADLINE_S,
     )
 
     state = await _load(redis)

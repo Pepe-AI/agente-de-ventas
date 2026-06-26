@@ -52,12 +52,6 @@ from app.understanding.schemas import (
 
 log = structlog.get_logger()
 
-# Inactivity window: a conversation silent this long AFTER its name is captured is
-# handed off as "No respondió" (the inactivity timer). Armed/refreshed in ``_send``,
-# cleared in ``_handoff``. EDIT THIS LOW (e.g. 60) ONLY for live validation; never
-# commit a low value.
-INACTIVITY_DEADLINE_S = 7200  # 2 hours
-
 FAREWELL = (
     "¡Gracias! Con esto tengo todo lo necesario. En un momento un asesor "
     "se pondrá en contacto contigo para darte una cotización. 🙌"
@@ -101,6 +95,7 @@ async def handle_message(
     corpus: str,
     handoff_runner: HandoffRunner,
     chat_connector: ChatConnector | None,
+    inactivity_deadline_s: float,
 ) -> str | None:
     """Run one conversation turn and return the bot's reply (``None`` = silent).
 
@@ -108,7 +103,9 @@ async def handle_message(
     handoff fast-path flag. ``routing`` has the campaign pre-fill phrases;
     ``corpus`` is the answerer's knowledge base; ``handoff_runner`` executes the CRM
     handoff sequence; ``chat_connector`` connects the Chats API chat at handoff
-    (``None`` = channel degraded at boot → chat connection skipped).
+    (``None`` = channel degraded at boot → chat connection skipped);
+    ``inactivity_deadline_s`` is how long after the name is captured a silent
+    conversation is auto-handed-off (config, threaded from Settings).
     """
     state = await store.load(msg.sender) or ConversationState()
 
@@ -122,7 +119,8 @@ async def handle_message(
     # Routing pre-phase: a not-yet-routed conversation picks a trip type first.
     if state.trip_type is None:
         return await _route(
-            redis, store, msg, state, routing, handoff_runner, chat_connector
+            redis, store, msg, state, routing, handoff_runner, chat_connector,
+            inactivity_deadline_s,
         )
 
     trip_type = state.trip_type  # routed: non-None for the rest of the turn
@@ -165,7 +163,7 @@ async def handle_message(
         understanding, llm, corpus, trip_type, state.last_bot_message,
         _ask_prompt(nxt, state.attempts),
     )
-    return await _send(store, msg, state, reply)
+    return await _send(store, msg, state, reply, inactivity_deadline_s)
 
 
 async def _route(
@@ -176,6 +174,7 @@ async def _route(
     routing: RoutingConfig,
     handoff_runner: HandoffRunner,
     chat_connector: ChatConnector | None,
+    inactivity_deadline_s: float,
 ) -> str:
     """Routing pre-phase: classify the trip type and start the flow, or ask.
 
@@ -185,7 +184,9 @@ async def _route(
     """
     trip_type = classify_trip_type(msg.text, msg.referral, routing)
     if trip_type is None:
-        return await _send(store, msg, state, _DISAMBIGUATION_QUESTION)
+        return await _send(
+            store, msg, state, _DISAMBIGUATION_QUESTION, inactivity_deadline_s
+        )
 
     state.trip_type = trip_type
     descriptor = descriptor_for(trip_type)
@@ -200,7 +201,9 @@ async def _route(
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
-    return await _send(store, msg, state, _ask_prompt(nxt, state.attempts))
+    return await _send(
+        store, msg, state, _ask_prompt(nxt, state.attempts), inactivity_deadline_s
+    )
 
 
 async def _with_answer(
@@ -258,7 +261,11 @@ def _ask_prompt(slot: SlotSpec, attempts: dict[str, int]) -> str:
 
 
 async def _send(
-    store: StateStore, msg: IncomingMessage, state: ConversationState, reply: str
+    store: StateStore,
+    msg: IncomingMessage,
+    state: ConversationState,
+    reply: str,
+    inactivity_deadline_s: float,
 ) -> str:
     """Record the outgoing message, persist state, and return ``reply``.
 
@@ -270,7 +277,7 @@ async def _send(
     state.last_bot_message = reply
     name = state.slots.get("nombre_cliente")
     if isinstance(name, str) and name.strip():
-        state.inactivity_deadline = time.time() + INACTIVITY_DEADLINE_S
+        state.inactivity_deadline = time.time() + inactivity_deadline_s
     await store.save(msg.sender, state)
     return reply
 

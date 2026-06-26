@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     block_cooldown_s: int = 600
     buffer_max: int = 10
 
+    # Inactivity timer (handoff 4th reason "No respondió"). Defaults = production;
+    # overridable per deployment via env to validate the timer live (e.g. lower
+    # them in the Render dashboard) without committing test values. Read once per
+    # process (get_settings is cached) -> a change needs a restart/redeploy.
+    inactivity_deadline_s: float = 7200.0  # 2h of customer silence -> auto-handoff
+    sweep_interval_s: float = 300.0  # seconds between inactivity sweeps
+
 
 @lru_cache
 def get_settings() -> Settings:

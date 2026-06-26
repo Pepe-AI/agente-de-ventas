@@ -27,7 +27,7 @@ from app.channels.twilio import InvalidPayloadError, TwilioChannel
 from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
-from app.concurrency.inactivity import SWEEP_INTERVAL_S, sweep_once
+from app.concurrency.inactivity import sweep_once
 from app.concurrency.mirror import schedule_mirror
 from app.config import HttpHeader, get_settings
 from app.crm import kommo_mapping_topviajes as kommo_mapping
@@ -102,14 +102,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 async def _inactivity_loop(app: FastAPI) -> None:
-    """Sweep for lapsed inactivity deadlines every ``SWEEP_INTERVAL_S`` (lifespan task).
+    """Sweep for lapsed inactivity deadlines every ``sweep_interval_s`` (lifespan task).
 
     Each tick rebuilds its dependencies from the composition root and never lets a
-    tick failure kill the loop; cancellation (shutdown) propagates cleanly.
+    tick failure kill the loop; cancellation (shutdown) propagates cleanly. The
+    interval comes from Settings (get_settings is cached -> resolved once per process).
     """
     while True:
         try:
-            await asyncio.sleep(SWEEP_INTERVAL_S)
+            await asyncio.sleep(get_settings().sweep_interval_s)
             await sweep_once(
                 time.time(),
                 redis=get_redis(),

@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from fakeredis import FakeAsyncRedis
 from structlog.testing import capture_logs
 
 from app.concurrency import lock
 from app.concurrency.handoff import is_handed_off
 from app.concurrency.inactivity import _SWEEP_LOCK_ID, _sweep_one, sweep_once
+from app.config import Settings
 from app.domain.handoff_orchestration import HandoffResult
 from app.domain.inactivity import run_inactivity_handoff
 from app.domain.models import HandoffReason, IncomingMessage
-from app.domain.orchestrator import INACTIVITY_DEADLINE_S, handle_message
+from app.domain.orchestrator import handle_message
 from app.domain.state import ConversationState, Phase
 from app.routing.campaign import RoutingConfig
 from app.understanding.schemas import TripType
@@ -25,6 +27,7 @@ from tests.fakes import InMemoryStateStore
 
 SENDER = "whatsapp:+5215512345678"
 PHONE = "+5215512345678"
+_DEADLINE_S = 7200.0  # the inactivity deadline the driver passes to handle_message
 
 _ROUTING = RoutingConfig(prefill_crucero=None, prefill_europa=None, prefill_asia=None)
 _CORPUS = "CORPUS DE PRUEBA"
@@ -130,6 +133,7 @@ async def _drive(
         _CORPUS,
         runner or _Runner(),
         None,  # chat_connector degraded -> chat skipped
+        _DEADLINE_S,
     )
 
 
@@ -146,8 +150,8 @@ async def test_deadline_armed_when_name_present_on_send() -> None:
 
     state = await store.load(SENDER)
     assert state is not None and state.inactivity_deadline is not None
-    assert before + INACTIVITY_DEADLINE_S <= state.inactivity_deadline
-    assert state.inactivity_deadline <= after + INACTIVITY_DEADLINE_S + 1
+    assert before + _DEADLINE_S <= state.inactivity_deadline
+    assert state.inactivity_deadline <= after + _DEADLINE_S + 1
 
 
 async def test_deadline_not_armed_before_name_captured() -> None:
@@ -334,6 +338,34 @@ async def test_sweep_skips_when_tick_lock_is_held() -> None:
     assert runner.calls == []  # another sweeper owns this tick
     saved = await store.load(SENDER)
     assert saved is not None and saved.phase is Phase.COLLECTING
+
+
+# --- config: env-overridable with production defaults -----------------------
+
+
+def test_inactivity_settings_defaults() -> None:
+    # Behaviour is unchanged when the env vars are absent: 2h deadline, 5min sweep.
+    assert Settings.model_fields["inactivity_deadline_s"].default == 7200.0
+    assert Settings.model_fields["sweep_interval_s"].default == 300.0
+
+
+def test_inactivity_settings_override_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in {
+        "TWILIO_ACCOUNT_SID": "sid",
+        "TWILIO_AUTH_TOKEN": "tok",
+        "TWILIO_WHATSAPP_FROM": "whatsapp:+1",
+        "REDIS_URL": "redis://x",
+        "DATABASE_URL": "postgres://x",
+        "GEMINI_API_KEY": "g",
+        "INACTIVITY_DEADLINE_S": "60",
+        "SWEEP_INTERVAL_S": "10",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    settings = Settings()  # built directly, bypassing the get_settings cache
+
+    assert settings.inactivity_deadline_s == 60.0
+    assert settings.sweep_interval_s == 10.0
 
 
 async def test_sweep_skips_a_sender_whose_lock_is_held_by_a_flush() -> None:

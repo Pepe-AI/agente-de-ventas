@@ -13,7 +13,12 @@ from app.config import Settings
 
 @dataclass(frozen=True, slots=True)
 class ConcurrencyConfig:
-    """Thresholds, TTLs and windows for the concurrency layer."""
+    """Settings-derived knobs threaded to the message-processing path.
+
+    Mostly concurrency thresholds/TTLs/windows; also carries the orchestrator's
+    inactivity deadline (a per-turn timer armed in the same path) so flush can pass
+    it to ``handle_message`` without a separate thread.
+    """
 
     debounce_window_s: float
     dedup_ttl_s: int
@@ -22,6 +27,7 @@ class ConcurrencyConfig:
     rate_threshold: int
     block_cooldown_s: int
     buffer_max: int
+    inactivity_deadline_s: float
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ConcurrencyConfig:
@@ -34,4 +40,5 @@ class ConcurrencyConfig:
             rate_threshold=settings.rate_threshold,
             block_cooldown_s=settings.block_cooldown_s,
             buffer_max=settings.buffer_max,
+            inactivity_deadline_s=settings.inactivity_deadline_s,
         )

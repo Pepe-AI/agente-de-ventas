@@ -127,6 +127,7 @@ async def flush(
                 corpus,
                 handoff_runner,
                 chat_connector,
+                config.inactivity_deadline_s,
             )
         except LLMUnavailableError:
             # Transient LLM outage after retries. handle_message only persists on

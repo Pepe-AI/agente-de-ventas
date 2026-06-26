@@ -1,7 +1,8 @@
 """Inactivity sweeper: hand off conversations that went silent past their deadline.
 
-A periodic task (started in the app lifespan) calls :func:`sweep_once` every
-``SWEEP_INTERVAL_S``. Each tick takes a single-sweeper Redis lock (so a future
+A periodic task (started in the app lifespan) calls :func:`sweep_once` on the
+lifespan loop's cadence (``Settings.sweep_interval_s``). Each tick takes a
+single-sweeper Redis lock (so a future
 multi-instance / multi-worker deploy never double-sweeps — today there is one
 instance), queries Postgres for due deadlines, and per conversation takes the
 SAME per-sender lock the flush uses: if a flush holds it, the inbound message wins
@@ -26,7 +27,6 @@ from app.domain.state import Phase, StateStore
 
 log = structlog.get_logger()
 
-SWEEP_INTERVAL_S = 300  # 5 minutes between sweeps
 # Single-sweeper lock: a fixed identifier (no real sender equals it), so only one
 # sweeper runs per tick. TTL > a sweep, < the interval, so a crashed sweeper frees it.
 _SWEEP_LOCK_ID = "inactivity_sweep"

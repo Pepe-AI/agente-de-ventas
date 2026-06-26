@@ -108,6 +108,7 @@ def config() -> ConcurrencyConfig:
         rate_threshold=3,
         block_cooldown_s=600,
         buffer_max=5,
+        inactivity_deadline_s=7200.0,
     )
 
 
