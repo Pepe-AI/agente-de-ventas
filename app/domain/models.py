@@ -16,6 +16,7 @@ class HandoffReason(StrEnum):
     COMPLETE = "completa"  # all required slots captured
     STUCK = "atorado"  # gave up on a required slot after repeated failures
     HUMAN_REQUESTED = "pidió_humano"  # the user asked to talk to a person
+    NO_RESPONSE = "no_respondió"  # went silent past the inactivity window (timer)
 
 
 @dataclass(frozen=True, slots=True)

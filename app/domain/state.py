@@ -62,6 +62,10 @@ class ConversationState:
     # The Chats API chat id linked to the contact at handoff (B1); the key for the
     # B2 mirror and B3 drain. ``None`` until a chat is connected.
     chat_id: str | None = None
+    # Unix-epoch seconds after which a silent conversation is handed off for
+    # inactivity ("No respondió"). Armed/refreshed once the name is captured (see
+    # the orchestrator), cleared at any handoff. ``None`` = no timer running.
+    inactivity_deadline: float | None = None
 
 
 def to_payload(state: ConversationState) -> dict[str, Any]:
@@ -81,6 +85,7 @@ def to_payload(state: ConversationState) -> dict[str, Any]:
         "pending": sorted(state.pending),
         "last_bot_message": state.last_bot_message,
         "chat_id": state.chat_id,
+        "inactivity_deadline": state.inactivity_deadline,
     }
 
 
@@ -100,6 +105,7 @@ def from_payload(data: dict[str, Any]) -> ConversationState:
         pending=set(data.get("pending", [])),
         last_bot_message=data.get("last_bot_message"),
         chat_id=data.get("chat_id"),
+        inactivity_deadline=data.get("inactivity_deadline"),
     )
 
 
@@ -117,6 +123,15 @@ class StateStore(Protocol):
 
     async def save(self, conversation_id: str, state: ConversationState) -> None:
         """Persist (upsert) the state for ``conversation_id``."""
+        ...
+
+    async def find_expired_deadlines(
+        self, now: float
+    ) -> list[tuple[str, ConversationState]]:
+        """Return ``(conversation_id, state)`` for still-collecting conversations
+        whose ``inactivity_deadline`` is due (``<= now``). The phase filter is a
+        belt-and-suspenders guard so an already-handed-off lead is never swept.
+        """
         ...
 
 

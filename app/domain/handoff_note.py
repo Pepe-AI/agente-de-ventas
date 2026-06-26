@@ -27,6 +27,10 @@ _COMPLETE_NOTE = (
     "Listo para preparar propuesta."
 )
 _HUMAN_REQUESTED_NOTE = "El cliente solicitó hablar directamente con un asesor."
+_NO_RESPONSE_NOTE = (
+    "El cliente dejó de responder tras iniciar la conversación. "
+    "Transferido por inactividad para seguimiento."
+)
 _STUCK_TEMPLATE = (
     "El bot no logró obtener: {labels} tras varios intentos. "
     "El resto de la información está en los campos del lead."
@@ -71,6 +75,8 @@ def compose_handoff_note(
         return _COMPLETE_NOTE
     if reason is HandoffReason.HUMAN_REQUESTED:
         return _HUMAN_REQUESTED_NOTE
+    if reason is HandoffReason.NO_RESPONSE:
+        return _NO_RESPONSE_NOTE
     if reason is HandoffReason.STUCK:
         return _STUCK_TEMPLATE.format(labels=_join_labels(_pending_labels(pending)))
     raise ValueError(f"unsupported handoff reason: {reason}")  # defensive

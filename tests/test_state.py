@@ -71,6 +71,7 @@ def test_from_payload_tolerates_legacy_payload_missing_late_fields() -> None:
     assert state.pending == set()
     assert state.last_bot_message is None
     assert state.chat_id is None  # B1 field absent in legacy payloads
+    assert state.inactivity_deadline is None  # inactivity-timer field absent too
 
 
 # --- merge_slots ------------------------------------------------------------

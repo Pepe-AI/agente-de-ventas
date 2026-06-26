@@ -30,6 +30,15 @@ DO UPDATE SET state = EXCLUDED.state, updated_at = now()
 
 _SELECT = "SELECT state FROM conversation_state WHERE conversation_id = $1"
 
+# Sweep for the inactivity timer: still-collecting conversations whose deadline is
+# due. No index yet (acceptable at current scale; noted as future debt).
+_SELECT_EXPIRED = """
+SELECT conversation_id, state FROM conversation_state
+WHERE (state->>'inactivity_deadline') IS NOT NULL
+  AND (state->>'inactivity_deadline')::double precision <= $1
+  AND state->>'phase' = 'collecting'
+"""
+
 
 class PostgresStateStore:
     """Durable conversation-state store backed by a JSONB column."""
@@ -48,6 +57,15 @@ class PostgresStateStore:
         await self._pool.execute(
             _UPSERT, conversation_id, json.dumps(to_payload(state))
         )
+
+    async def find_expired_deadlines(
+        self, now: float
+    ) -> list[tuple[str, ConversationState]]:
+        rows = await self._pool.fetch(_SELECT_EXPIRED, now)
+        return [
+            (row["conversation_id"], from_payload(json.loads(row["state"])))
+            for row in rows
+        ]
 
 
 async def create_pool(dsn: str) -> asyncpg.Pool:

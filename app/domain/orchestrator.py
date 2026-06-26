@@ -21,6 +21,8 @@ State is persisted between turns in Redis.
 
 from __future__ import annotations
 
+import time
+
 import structlog
 from redis.asyncio import Redis
 
@@ -49,6 +51,12 @@ from app.understanding.schemas import (
 )
 
 log = structlog.get_logger()
+
+# Inactivity window: a conversation silent this long AFTER its name is captured is
+# handed off as "No respondió" (the inactivity timer). Armed/refreshed in ``_send``,
+# cleared in ``_handoff``. EDIT THIS LOW (e.g. 60) ONLY for live validation; never
+# commit a low value.
+INACTIVITY_DEADLINE_S = 7200  # 2 hours
 
 FAREWELL = (
     "¡Gracias! Con esto tengo todo lo necesario. En un momento un asesor "
@@ -252,10 +260,50 @@ def _ask_prompt(slot: SlotSpec, attempts: dict[str, int]) -> str:
 async def _send(
     store: StateStore, msg: IncomingMessage, state: ConversationState, reply: str
 ) -> str:
-    """Record the outgoing message, persist state, and return ``reply``."""
+    """Record the outgoing message, persist state, and return ``reply``.
+
+    Once the customer's name is captured, (re-)arm the inactivity deadline: every
+    continuing turn pushes it forward, so it tracks the last customer activity. A
+    handoff never reaches here (it goes through ``_handoff``), so the phase is always
+    COLLECTING at this point.
+    """
     state.last_bot_message = reply
+    name = state.slots.get("nombre_cliente")
+    if isinstance(name, str) and name.strip():
+        state.inactivity_deadline = time.time() + INACTIVITY_DEADLINE_S
     await store.save(msg.sender, state)
     return reply
+
+
+async def connect_chat_at_handoff(
+    state: ConversationState,
+    sender: str,
+    phone: str,
+    customer_name: str,
+    contact_id: int,
+    *,
+    chat_connector: ChatConnector | None,
+    store: StateStore,
+) -> None:
+    """Connect the B1 Chats chat at handoff: create ONCE + persist + ALWAYS link.
+
+    Shared by the turn-based ``_handoff`` and the inactivity headless handoff. The
+    ``conversation_id`` is the customer phone (B1's deterministic map key). The chat
+    is created only if not already linked (gated on ``state.chat_id``) and persisted
+    IMMEDIATELY, so a link failure never recreates it; the link is idempotent, so a
+    retry re-links. A degraded channel (``chat_connector`` None) is skipped + warned.
+    Any create/link failure RAISES (the caller then does not flip the phase).
+    """
+    if chat_connector is None:
+        log.warning("handoff_chat_skipped_channel_unavailable", sender=sender)
+        return
+    chat_id = state.chat_id
+    if chat_id is None:
+        user = KommoChatUser(id=f"wa-{phone}", name=customer_name, phone=phone)
+        chat_id = await chat_connector.create_chat(phone, user)  # 1) create
+        state.chat_id = chat_id
+        await store.save(sender, state)  # 2) PERSIST between create and link
+    await chat_connector.link(contact_id, chat_id)  # 3) ALWAYS link
 
 
 async def _handoff(
@@ -299,21 +347,14 @@ async def _handoff(
         pending=pending,
     )
 
-    # B1 chat connection (conversation_id = the customer phone — the deterministic
-    # map key for the B2 mirror / B3 drain).
-    if chat_connector is not None:
-        chat_id = state.chat_id
-        if chat_id is None:
-            user = KommoChatUser(id=f"wa-{phone}", name=customer_name, phone=phone)
-            chat_id = await chat_connector.create_chat(phone, user)  # 1) create
-            state.chat_id = chat_id
-            await store.save(msg.sender, state)  # 2) PERSIST between create and link
-        await chat_connector.link(result.contact_id, chat_id)  # 3) ALWAYS link
-    else:
-        log.warning("handoff_chat_skipped_channel_unavailable", sender=msg.sender)
+    await connect_chat_at_handoff(
+        state, msg.sender, phone, customer_name, result.contact_id,
+        chat_connector=chat_connector, store=store,
+    )
 
     state.phase = Phase.HANDED_OFF
     state.last_asked = None
+    state.inactivity_deadline = None  # handed off -> the inactivity timer is moot
     await store.save(msg.sender, state)
     await set_handoff(redis, msg.sender)
     return reply

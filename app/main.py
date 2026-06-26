@@ -7,8 +7,10 @@ orchestrator and sending the reply) happens in a background flush.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import lru_cache
 from typing import Annotated
 
@@ -25,6 +27,7 @@ from app.channels.twilio import InvalidPayloadError, TwilioChannel
 from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
+from app.concurrency.inactivity import SWEEP_INTERVAL_S, sweep_once
 from app.concurrency.mirror import schedule_mirror
 from app.config import HttpHeader, get_settings
 from app.crm import kommo_mapping_topviajes as kommo_mapping
@@ -87,10 +90,37 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # degrades: the app still serves (the CRM handoff works), only chat connection is
     # skipped until a restart re-resolves it. See _resolve_scope_id_at_boot.
     app.state.scope_id = await _resolve_scope_id_at_boot()
+    # Periodic inactivity sweep (durable deadlines in Postgres survive restarts).
+    sweeper = asyncio.create_task(_inactivity_loop(app))
     try:
         yield
     finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
         await pool.close()
+
+
+async def _inactivity_loop(app: FastAPI) -> None:
+    """Sweep for lapsed inactivity deadlines every ``SWEEP_INTERVAL_S`` (lifespan task).
+
+    Each tick rebuilds its dependencies from the composition root and never lets a
+    tick failure kill the loop; cancellation (shutdown) propagates cleanly.
+    """
+    while True:
+        try:
+            await asyncio.sleep(SWEEP_INTERVAL_S)
+            await sweep_once(
+                time.time(),
+                redis=get_redis(),
+                store=PostgresStateStore(app.state.pool),
+                handoff_runner=get_handoff_runner(),
+                chat_connector=_build_chat_connector(app.state.scope_id),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("inactivity_loop_tick_failed")
 
 
 async def _resolve_scope_id_at_boot() -> str | None:
@@ -222,6 +252,17 @@ def get_handoff_runner() -> HandoffRunner:
     return HandoffRunner(get_kommo_crm_client(), mapping)
 
 
+def _build_chat_connector(scope_id: str | None) -> ChatConnector | None:
+    """Build a chat connector for ``scope_id`` (``None`` = degraded channel).
+
+    Shared by the request DI (``get_chat_connector``) and the inactivity loop, which
+    has no ``Request`` but reads ``app.state.scope_id`` directly.
+    """
+    if scope_id is None:
+        return None
+    return ChatConnector(get_kommo_chats_client(), get_kommo_crm_client(), scope_id)
+
+
 def get_chat_connector(request: Request) -> ChatConnector | None:
     """Build the chat connector from the boot-resolved scope_id (``None`` = degraded).
 
@@ -229,9 +270,7 @@ def get_chat_connector(request: Request) -> ChatConnector | None:
     connection (and warns), while the CRM handoff still completes and flips the phase.
     """
     scope_id: str | None = request.app.state.scope_id
-    if scope_id is None:
-        return None
-    return ChatConnector(get_kommo_chats_client(), get_kommo_crm_client(), scope_id)
+    return _build_chat_connector(scope_id)
 
 
 def get_chat_mirror(request: Request) -> ChatMirror | None:

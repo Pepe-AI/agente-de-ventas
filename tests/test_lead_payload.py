@@ -200,8 +200,8 @@ def test_mapping_reason_status_and_pipeline_ids() -> None:
         HandoffReason.COMPLETE: 107566779,
         HandoffReason.STUCK: 107566783,
         HandoffReason.HUMAN_REQUESTED: 107566783,
+        HandoffReason.NO_RESPONSE: 107566787,  # inactivity timer -> "No respondió"
     }
-    # Parked for the future inactivity-timer increment (no HandoffReason yet).
     assert m.STATUS_NO_RESPONDIO == 107566787
 
 

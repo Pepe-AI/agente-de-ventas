@@ -26,6 +26,12 @@ def test_human_requested_note_is_the_approved_text() -> None:
     assert compose_handoff_note(HandoffReason.HUMAN_REQUESTED) == _HUMAN_NOTE
 
 
+def test_no_response_note_explains_inactivity_without_data() -> None:
+    note = compose_handoff_note(HandoffReason.NO_RESPONSE)
+    assert "inactividad" in note.lower()
+    assert "seguimiento" in note.lower()
+
+
 def test_stuck_note_single_pending_slot_uses_readable_label() -> None:
     note = compose_handoff_note(HandoffReason.STUCK, ["presupuesto_europa"])
     assert note == (

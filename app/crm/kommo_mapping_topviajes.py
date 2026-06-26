@@ -48,6 +48,7 @@ REASON_STATUS_IDS: dict[HandoffReason, int] = {
     HandoffReason.COMPLETE: 107566779,  # Calificado
     HandoffReason.STUCK: 107566783,  # Atención 1 a 1
     HandoffReason.HUMAN_REQUESTED: 107566783,  # Atención 1 a 1
+    HandoffReason.NO_RESPONSE: 107566787,  # No respondió (inactivity timer)
 }
 
 # Every stage of PIPELINE_ID by its sort order (lower = earlier in the funnel),
@@ -64,7 +65,7 @@ STATUS_SORT: dict[int, int] = {
     143: 11000,  # perdido (lost — global terminal)
 }
 
-# Stage for a lead that went silent past the inactivity window. Parked here as
-# per-client config; there is no HandoffReason for it yet (the inactivity timer
-# is a future increment), so it is not in REASON_STATUS_IDS.
+# Stage for a lead that went silent past the inactivity window. Now wired to
+# HandoffReason.NO_RESPONSE in REASON_STATUS_IDS above (the inactivity timer); kept
+# as a named constant for callers that reference the stage directly.
 STATUS_NO_RESPONDIO = 107566787  # No respondió
