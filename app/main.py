@@ -371,7 +371,7 @@ async def kommo_chats_webhook(
     # Raw bytes: never declare a body model, which would consume/re-parse them.
     body = await request.body()
     signature = request.headers.get(KommoHeader.SIGNATURE, "")
-    if not signature or not signer.verify(body, signature):
+    if not signature or not signer.verify_inbound(body, signature):
         log.warning("kommo_invalid_signature", scope_id=scope_id)
         return Response(status_code=401)
 

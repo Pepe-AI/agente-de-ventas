@@ -51,6 +51,45 @@ def test_verify_does_not_raise_on_malformed_signature() -> None:
     assert signer.verify(_BODY, "ñó-not-ascii-hex") is False
 
 
+# A REAL inbound webhook body Kommo sent: note the trailing "\n" it transmits but
+# does NOT include in the X-Signature (empirically confirmed against the live
+# payload — the captured signature matched the HMAC of this body WITHOUT the "\n").
+_INBOUND_BODY = (
+    b'{"receiver":"wa-+5215583232460","conversation_id":"+5215583232460",'
+    b'"msec_timestamp":1782436669124,"type":"text","text":"going","markup":null,'
+    b'"tag":"","media":"","thumbnail":"","file_name":"","file_size":0,'
+    b'"media_group_id":""}\n'
+)
+
+
+def test_verify_inbound_accepts_signature_over_body_without_trailing_newline() -> None:
+    signer = KommoSigner(_SECRET)
+    assert _INBOUND_BODY.endswith(b"\n")
+    # Kommo signs the body WITHOUT the trailing "\n" it transmits.
+    signature = signer.sign(_INBOUND_BODY[:-1])
+
+    # Inbound verify strips one "\n" -> matches. The plain verify (over the body
+    # as received, WITH the "\n") would NOT — that asymmetry caused the 401.
+    assert signer.verify_inbound(_INBOUND_BODY, signature) is True
+    assert signer.verify(_INBOUND_BODY, signature) is False
+
+
+def test_verify_inbound_also_accepts_a_body_without_a_trailing_newline() -> None:
+    signer = KommoSigner(_SECRET)
+    body = _INBOUND_BODY[:-1]  # no trailing "\n"
+    signature = signer.sign(body)
+
+    assert not body.endswith(b"\n")
+    # body[:-1] only applies when it ends with "\n", so a clean body still verifies.
+    assert signer.verify_inbound(body, signature) is True
+
+
+def test_verify_inbound_rejects_a_wrong_signature() -> None:
+    signer = KommoSigner(_SECRET)
+
+    assert signer.verify_inbound(_INBOUND_BODY, "deadbeef") is False
+
+
 def test_outbound_headers_are_complete_and_consistent() -> None:
     signer = KommoSigner(_SECRET)
 
