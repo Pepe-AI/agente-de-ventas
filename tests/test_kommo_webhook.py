@@ -122,7 +122,14 @@ def test_get_kommo_signer_raises_503_when_secret_unset(
     assert exc_info.value.status_code == 503
 
 
-async def test_enqueue_inbound_durably_stores_payload() -> None:
+async def test_enqueue_inbound_durably_stores_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This test asserts ONLY the durable rpush; stub the background relay scheduling
+    # (which resolves the Twilio channel from Settings, absent in the offline suite).
+    monkeypatch.setattr(
+        "app.crm.kommo_inbound._schedule_relay", lambda _redis, _scope_id: None
+    )
     redis = FakeAsyncRedis(decode_responses=True)
     body = b'{"x":1}'
 
