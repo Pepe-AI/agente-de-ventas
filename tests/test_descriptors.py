@@ -25,10 +25,10 @@ CRUISE_SLOT_ORDER = [
     "cabinas_crucero",
     "tipo_cabina",
     "experiencia_crucero",
-    "servicios_crucero",
     "ciudad_salida_crucero",
     "presupuesto_crucero",
     "pasaporte_crucero",
+    "servicios_crucero",
 ]
 
 CRUISE_REQUIRED = {

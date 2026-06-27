@@ -363,10 +363,11 @@ async def test_vague_destination_satisfied_by_experience() -> None:
         redis,    )
 
     # Destination requirement satisfied; we move on without re-asking it, and
-    # never ask the passive experience escape itself.
+    # never ask the passive experience escape itself. Next askable is the required
+    # fechas (servicios moved to the end of the flow).
     assert reply != _prompt_of(TripType.EUROPE, "paises_europa")
     assert reply != _prompt_of(TripType.EUROPE, "experiencia_europa")
-    assert reply == _prompt_of(TripType.EUROPE, "servicios_europa")
+    assert reply == _prompt_of(TripType.EUROPE, "fechas_europa")
 
 
 # --- Minors need ages -------------------------------------------------------

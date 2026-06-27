@@ -189,8 +189,10 @@ def test_next_to_ask_never_returns_non_askable_experience() -> None:
     nxt = next_slot_to_ask(descriptor, state, set(), _NO_PENDING)
 
     assert nxt is not None
-    assert nxt.name != "experiencia_europa"
-    assert nxt.name == "servicios_europa"
+    assert nxt.name != "experiencia_europa"  # the passive escape is never asked
+    # The next askable after the destination is the required fechas (servicios
+    # moved to the end of the flow).
+    assert nxt.name == "fechas_europa"
 
 
 def test_next_to_ask_skips_pending_required() -> None:
@@ -221,3 +223,39 @@ def test_next_to_ask_none_when_requireds_done_or_pending_and_optionals_asked() -
     )
 
     assert nxt is None
+
+
+def _satisfy_requireds(trip: TripType) -> dict[str, object]:
+    """A slots dict satisfying every required slot of ``trip`` (valid values)."""
+    slots: dict[str, object] = {}
+    for slot in descriptor_for(trip).slots:
+        if not slot.required:
+            continue
+        if slot.rule is SlotRule.PASSENGERS:
+            slots[slot.name] = {"adults": 2, "minors_mentioned": False}
+        elif slot.rule is SlotRule.BUDGET:
+            slots[slot.name] = {"defer_to_advisor": True}
+        else:
+            slots[slot.name] = "algo"
+    return slots
+
+
+def test_servicios_is_the_last_askable_in_all_three_flows() -> None:
+    # With every required satisfied and every askable optional asked EXCEPT
+    # servicios, next_slot_to_ask must return servicios (it is now the final
+    # question), and asking it leaves nothing askable -> ready to hand off.
+    for trip, servicios in (
+        (TripType.CRUISE, "servicios_crucero"),
+        (TripType.EUROPE, "servicios_europa"),
+        (TripType.ASIA, "servicios_asia"),
+    ):
+        descriptor = descriptor_for(trip)
+        slots = _satisfy_requireds(trip)
+        optionals = {s.name for s in descriptor.slots if s.askable and not s.required}
+        asked_but_servicios = optionals - {servicios}
+
+        nxt = next_slot_to_ask(descriptor, slots, asked_but_servicios, _NO_PENDING)
+        assert nxt is not None and nxt.name == servicios
+
+        done = next_slot_to_ask(descriptor, slots, optionals, _NO_PENDING)
+        assert done is None

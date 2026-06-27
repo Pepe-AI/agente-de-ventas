@@ -121,10 +121,6 @@ _CRUISE = TripSchema(
             "¿Qué tipo de experiencia a bordo busca?",
         ),
         SlotSpec(
-            "servicios_crucero", str, False,
-            "¿Le interesa contratar algún servicio adicional?",
-        ),
-        SlotSpec(
             "ciudad_salida_crucero", str, False,
             "¿Desde qué ciudad le gustaría salir?",
         ),
@@ -137,6 +133,10 @@ _CRUISE = TripSchema(
         SlotSpec(
             "pasaporte_crucero", str, False,
             "¿Cuenta con pasaporte vigente?",
+        ),
+        SlotSpec(
+            "servicios_crucero", str, False,
+            "¿Le interesa contratar algún servicio adicional?",
         ),
     ),
 )
@@ -166,10 +166,6 @@ def _continent_schema(
                 f"experiencia{suffix}", str, False,
                 "¿Qué tipo de experiencia busca en este viaje?",
                 askable=False,  # passive: captured from the destination answer
-            ),
-            SlotSpec(
-                f"servicios{suffix}", str, False,
-                "¿Le interesa contratar algún servicio adicional?",
             ),
             SlotSpec(
                 f"fechas{suffix}", str, True,
@@ -210,6 +206,10 @@ def _continent_schema(
             SlotSpec(
                 f"pasaporte{suffix}", str, False,
                 "¿Cuenta con pasaporte vigente?",
+            ),
+            SlotSpec(
+                f"servicios{suffix}", str, False,
+                "¿Le interesa contratar algún servicio adicional?",
             ),
         ),
     )
