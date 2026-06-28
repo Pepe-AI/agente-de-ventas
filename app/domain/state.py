@@ -66,6 +66,12 @@ class ConversationState:
     # inactivity ("No respondió"). Armed/refreshed once the name is captured (see
     # the orchestrator), cleared at any handoff. ``None`` = no timer running.
     inactivity_deadline: float | None = None
+    # Handoff idempotency marker: the CRM lead+contact created/reused on the FIRST
+    # successful HandoffRunner.run. Persisted so a handoff retry (e.g. after a chat
+    # link failure) SKIPS run (no duplicate note/fields) and links to the SAME
+    # contact. ``None`` until the first run succeeds.
+    lead_id: int | None = None
+    contact_id: int | None = None
 
 
 def to_payload(state: ConversationState) -> dict[str, Any]:
@@ -86,6 +92,8 @@ def to_payload(state: ConversationState) -> dict[str, Any]:
         "last_bot_message": state.last_bot_message,
         "chat_id": state.chat_id,
         "inactivity_deadline": state.inactivity_deadline,
+        "lead_id": state.lead_id,
+        "contact_id": state.contact_id,
     }
 
 
@@ -106,6 +114,8 @@ def from_payload(data: dict[str, Any]) -> ConversationState:
         last_bot_message=data.get("last_bot_message"),
         chat_id=data.get("chat_id"),
         inactivity_deadline=data.get("inactivity_deadline"),
+        lead_id=data.get("lead_id"),
+        contact_id=data.get("contact_id"),
     )
 
 

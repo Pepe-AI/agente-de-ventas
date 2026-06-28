@@ -21,7 +21,9 @@ State is persisted between turns in Redis.
 
 from __future__ import annotations
 
+import json
 import time
+from typing import cast
 
 import structlog
 from redis.asyncio import Redis
@@ -29,6 +31,7 @@ from redis.asyncio import Redis
 from app.answering.answerer import answer_question
 from app.concurrency.handoff import set_handoff
 from app.crm.kommo_chats import KommoChatUser
+from app.crm.kommo_crm import KommoCrmError
 from app.domain.chat_connection import ChatConnector
 from app.domain.completeness import is_satisfied, next_slot_to_ask
 from app.domain.handoff_orchestration import HandoffRunner, phone_from_sender
@@ -282,6 +285,25 @@ async def _send(
     return reply
 
 
+def _is_chat_already_linked(exc: KommoCrmError) -> bool:
+    """Whether ``exc`` is Kommo's 400 "chat already linked to another entity".
+
+    Robust + never raises: a non-2xx ``KommoCrmError`` carries the response body as a
+    ``str`` (or ``None``); parse it defensively and match the specific
+    ``AlreadyExists`` code, so ONLY this error is swallowed (any other propagates).
+    If we cannot confirm it is AlreadyExists, return ``False`` (do not mask).
+    """
+    if exc.status != 400 or not exc.body:
+        return False
+    try:
+        payload: object = json.loads(exc.body)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return cast("dict[str, object]", payload).get("code") == "AlreadyExists"
+
+
 async def connect_chat_at_handoff(
     state: ConversationState,
     sender: str,
@@ -310,7 +332,16 @@ async def connect_chat_at_handoff(
         chat_id = await chat_connector.create_chat(phone, user)  # 1) create
         state.chat_id = chat_id
         await store.save(sender, state)  # 2) PERSIST between create and link
-    await chat_connector.link(contact_id, chat_id)  # 3) ALWAYS link
+    try:
+        await chat_connector.link(contact_id, chat_id)  # 3) ALWAYS link
+    except KommoCrmError as exc:
+        if not _is_chat_already_linked(exc):
+            raise
+        # Multi-contact split (Fix B's territory): the chat is already linked to a
+        # contact of this phone, not the one resolved now. NON-FATAL — don't block
+        # the flip; the bot unblocks and B2/B3 (phone-keyed) resume. The advisor may
+        # need a manual Kommo contact merge to see the chat on the qualified lead.
+        log.warning("handoff_chat_already_linked", sender=sender, body=exc.body)
 
 
 async def _handoff(
@@ -342,20 +373,28 @@ async def _handoff(
     state.last_bot_message = reply
     await store.save(msg.sender, state)
 
-    pending = tuple(sorted(state.pending))
     phone = phone_from_sender(msg.sender)
     name = state.slots.get("nombre_cliente")
     customer_name = name if isinstance(name, str) and name.strip() else phone
-    result = await handoff_runner.run(
-        reason=reason,
-        phone=phone,
-        customer_name=customer_name,
-        slots=state.slots,
-        pending=pending,
-    )
+
+    # Idempotency marker: run the CRM sequence ONCE. A retry (e.g. after a chat-link
+    # failure left phase=COLLECTING) reuses the persisted lead/contact and SKIPS run,
+    # so the note/fields are not re-posted and the link targets the SAME contact.
+    contact_id = state.contact_id
+    if contact_id is None:
+        result = await handoff_runner.run(
+            reason=reason,
+            phone=phone,
+            customer_name=customer_name,
+            slots=state.slots,
+            pending=tuple(sorted(state.pending)),
+        )
+        state.lead_id = result.lead_id
+        state.contact_id = contact_id = result.contact_id
+        await store.save(msg.sender, state)  # persist the marker BEFORE the link
 
     await connect_chat_at_handoff(
-        state, msg.sender, phone, customer_name, result.contact_id,
+        state, msg.sender, phone, customer_name, contact_id,
         chat_connector=chat_connector, store=store,
     )
 

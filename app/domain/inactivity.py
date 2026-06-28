@@ -43,15 +43,23 @@ async def run_inactivity_handoff(
     phone = phone_from_sender(sender)
     name = state.slots.get("nombre_cliente")
     customer_name = name if isinstance(name, str) and name.strip() else phone
-    result = await handoff_runner.run(
-        reason=HandoffReason.NO_RESPONSE,
-        phone=phone,
-        customer_name=customer_name,
-        slots=state.slots,
-        pending=(),
-    )
+
+    # Same idempotency marker as ``_handoff``: run the CRM sequence ONCE; a swept
+    # retry reuses the persisted lead/contact and skips run (no duplicate note).
+    contact_id = state.contact_id
+    if contact_id is None:
+        result = await handoff_runner.run(
+            reason=HandoffReason.NO_RESPONSE,
+            phone=phone,
+            customer_name=customer_name,
+            slots=state.slots,
+            pending=(),
+        )
+        state.lead_id = result.lead_id
+        state.contact_id = contact_id = result.contact_id
+        await store.save(sender, state)  # persist the marker BEFORE the link
     await connect_chat_at_handoff(
-        state, sender, phone, customer_name, result.contact_id,
+        state, sender, phone, customer_name, contact_id,
         chat_connector=chat_connector, store=store,
     )
     state.phase = Phase.HANDED_OFF

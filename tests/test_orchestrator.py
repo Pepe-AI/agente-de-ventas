@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fakeredis import FakeAsyncRedis
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 import app.domain.orchestrator as orch
 from app.concurrency.handoff import clear_handoff, is_handed_off
@@ -1124,3 +1125,101 @@ async def test_handoff_degraded_channel_skips_chat_but_completes() -> None:
     assert state.chat_id is None
     assert state.phase is Phase.HANDED_OFF
     assert await is_handed_off(redis, SENDER)
+
+
+# --- Fix A: AlreadyExists non-fatal + idempotency marker -------------------
+
+
+class _AlreadyExistsChatConnector(_FakeChatConnector):
+    """link raises Kommo's 400 AlreadyExists (chat linked to a different contact)."""
+
+    async def link(self, contact_id: int, chat_id: str) -> None:
+        raise KommoCrmError(
+            "Kommo CRM returned a non-2xx status",
+            status=400,
+            body=(
+                '{"code":"AlreadyExists","detail":"Chat already linked to '
+                'another entity","entity_id":777}'
+            ),
+        )
+
+
+async def test_handoff_already_linked_is_non_fatal_and_flips() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    connector = _AlreadyExistsChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    with capture_logs() as logs:
+        reply = await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    # AlreadyExists is swallowed -> the handoff completes and flips (no crash loop).
+    assert reply == FAREWELL
+    state = await _load(redis)
+    assert state.phase is Phase.HANDED_OFF
+    assert await is_handed_off(redis, SENDER)
+    assert any(e["event"] == "handoff_chat_already_linked" for e in logs)
+
+
+class _Other400ChatConnector(_FakeChatConnector):
+    """link raises a DIFFERENT 400 (not AlreadyExists) — must NOT be swallowed."""
+
+    async def link(self, contact_id: int, chat_id: str) -> None:
+        raise KommoCrmError(
+            "Kommo CRM returned a non-2xx status",
+            status=400,
+            body='{"code":"SomeOtherError","detail":"nope"}',
+        )
+
+
+async def test_handoff_other_400_still_propagates() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis)
+    connector = _Other400ChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    with capture_logs() as logs:
+        with pytest.raises(KommoCrmError):
+            await _handle(_msg("2000"), llm, redis, chat_connector=connector)
+
+    # A non-AlreadyExists 400 is NOT masked: re-raised -> no flip, no swallow log.
+    state = await _load(redis)
+    assert state.phase is Phase.COLLECTING
+    assert not await is_handed_off(redis, SENDER)
+    assert not any(e["event"] == "handoff_chat_already_linked" for e in logs)
+
+
+async def test_handoff_retry_with_marker_skips_run_and_reuses_contact() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed_completable(redis, chat_id="existing-chat")
+    # A retry: the CRM marker (lead_id/contact_id) from a prior run is persisted.
+    seeded = await _load(redis)
+    seeded.contact_id = 42
+    seeded.lead_id = 9364406
+    await _store_for(redis).save(SENDER, seeded)
+    runner = _FakeHandoffRunner()
+    connector = _FakeChatConnector()
+    llm = ScriptedLLM({"presupuesto_crucero": Budget(amount="2000 USD")})
+
+    await _handle(_msg("2000"), llm, redis, runner, chat_connector=connector)
+
+    assert runner.calls == []  # run() skipped -> no duplicate note/fields
+    assert connector.created == []  # chat_id set -> not recreated
+    assert connector.links == [(42, "existing-chat")]  # link reused the marker contact
+    state = await _load(redis)
+    assert state.phase is Phase.HANDED_OFF
+    assert await is_handed_off(redis, SENDER)
+
+
+def test_is_chat_already_linked_detects_only_that_400() -> None:
+    ok = KommoCrmError("x", status=400, body='{"code":"AlreadyExists","entity_id":1}')
+    assert orch._is_chat_already_linked(ok) is True
+    # Wrong status / wrong code / non-JSON / None / no status -> False, never raises.
+    cases = [
+        KommoCrmError("x", status=500, body='{"code":"AlreadyExists"}'),
+        KommoCrmError("x", status=400, body='{"code":"Other"}'),
+        KommoCrmError("x", status=400, body="not json at all"),
+        KommoCrmError("x", status=400, body=None),
+        KommoCrmError("x"),
+    ]
+    assert all(orch._is_chat_already_linked(e) is False for e in cases)
