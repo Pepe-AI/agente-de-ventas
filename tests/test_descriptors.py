@@ -137,13 +137,16 @@ def test_slot_prompts_use_formal_usted_register() -> None:
     # Spot-check the tone change (tú -> usted) across the three trip types.
     cruise = {s.name: s.prompt for s in descriptor_for(TripType.CRUISE).slots}
     assert cruise["nombre_cliente"] == "Para empezar, ¿me podría compartir su nombre?"
-    assert "su presupuesto" in cruise["presupuesto_crucero"]
+    assert "presupuesto aproximado en mente" in cruise["presupuesto_crucero"]
     assert cruise["pasaporte_crucero"] == "¿Cuenta con pasaporte vigente?"
+    # "Por último" lives on the real last askable slot (servicios), not pasaporte.
+    assert cruise["servicios_crucero"].startswith("Por último, ")
 
     europe = {s.name: s.prompt for s in descriptor_for(TripType.EUROPE).slots}
     assert "le gustaría visitar" in europe["paises_europa"]
-    assert europe["vuelos_europa"] == "¿Desea que incluyamos los vuelos?"
+    assert "incluyamos los vuelos en la propuesta" in europe["vuelos_europa"]
+    assert europe["servicios_europa"].startswith("Por último, ")
 
     asia = {s.name: s.prompt for s in descriptor_for(TripType.ASIA).slots}
     assert asia["nombre_cliente"] == "Para empezar, ¿me podría compartir su nombre?"
-    assert "su presupuesto" in asia["presupuesto_asia"]
+    assert "presupuesto aproximado en mente" in asia["presupuesto_asia"]

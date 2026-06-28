@@ -55,9 +55,17 @@ from app.understanding.schemas import (
 
 log = structlog.get_logger()
 
-FAREWELL = (
-    "¡Gracias! Con esto tengo todo lo necesario. En un momento un asesor "
-    "se pondrá en contacto contigo para darte una cotización. 🙌"
+# completa farewell — personalized with the customer's name when one is captured
+# (it always is at completa, since nombre_cliente is required); a clean name-less
+# fallback covers the defensive routing-turn handoff where no name exists yet.
+_FAREWELL_COMPLETE_NAMED = (
+    "¡Muchas gracias, {name}! 😊 Con esto tengo todo lo necesario. En un momento, "
+    "un asesor de TOPVIAJES se pondrá en contacto con usted para preparar su "
+    "cotización. 🙌"
+)
+_FAREWELL_COMPLETE_PLAIN = (
+    "¡Muchas gracias! 😊 Con esto tengo todo lo necesario. En un momento, un asesor "
+    "de TOPVIAJES se pondrá en contacto con usted para preparar su cotización. 🙌"
 )
 _FAREWELL_STUCK = (
     "¡Gracias! Con lo que me compartiste, un asesor continuará contigo para "
@@ -68,10 +76,21 @@ _FAREWELL_HUMAN = (
     "atención. 🙌"
 )
 _FAREWELL_BY_REASON: dict[HandoffReason, str] = {
-    HandoffReason.COMPLETE: FAREWELL,
+    HandoffReason.COMPLETE: _FAREWELL_COMPLETE_PLAIN,
     HandoffReason.STUCK: _FAREWELL_STUCK,
     HandoffReason.HUMAN_REQUESTED: _FAREWELL_HUMAN,
 }
+
+
+def _farewell_for(reason: HandoffReason, name: str | None) -> str:
+    """The farewell for ``reason``; only completa is personalized with ``name``.
+
+    The other reasons (atorado / pidió_humano) keep their fixed text — adding the
+    name to completa does not require touching them.
+    """
+    if reason is HandoffReason.COMPLETE and isinstance(name, str) and name.strip():
+        return _FAREWELL_COMPLETE_NAMED.format(name=name)
+    return _FAREWELL_BY_REASON[reason]
 
 # One-time opening greeting, prepended to the first slot question once the campaign
 # has resolved the trip type. Trip-aware so it names the destination; the only place
@@ -174,7 +193,7 @@ async def handle_message(
         reason = HandoffReason.STUCK if state.pending else HandoffReason.COMPLETE
         reply = await _with_answer(
             understanding, llm, corpus, trip_type, state.last_bot_message,
-            _FAREWELL_BY_REASON[reason],
+            _farewell_for(reason, state.slots.get("nombre_cliente")),
         )
         return await _handoff(
             redis, store, msg, state, reason, reply, handoff_runner, chat_connector
@@ -182,9 +201,15 @@ async def handle_message(
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
+    # Acknowledge the name once, on the first question after it was captured.
+    name = state.slots.get("nombre_cliente")
+    ack = ""
+    if not state.name_acknowledged and isinstance(name, str) and name.strip():
+        ack = f"¡Mucho gusto, {name}! 😊 "
+        state.name_acknowledged = True
     reply = await _with_answer(
         understanding, llm, corpus, trip_type, state.last_bot_message,
-        _ask_prompt(nxt, state.attempts),
+        f"{ack}{_ask_prompt(nxt, state.attempts)}",
     )
     return await _send(store, msg, state, reply, inactivity_deadline_s)
 
@@ -219,7 +244,7 @@ async def _route(
     nxt = next_slot_to_ask(descriptor, state.slots, state.asked, state.pending)
     if nxt is None:  # a schema with no askable slots — defensive, not expected
         reason = HandoffReason.COMPLETE
-        farewell = _FAREWELL_BY_REASON[reason]
+        farewell = _farewell_for(reason, state.slots.get("nombre_cliente"))
         return await _handoff(
             redis, store, msg, state, reason, farewell, handoff_runner,
             chat_connector,

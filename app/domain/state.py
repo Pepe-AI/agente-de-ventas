@@ -75,6 +75,9 @@ class ConversationState:
     # Whether the customer already received an opening message (the trip-aware
     # greeting OR the disambiguation question), so the greeting is never repeated.
     greeted: bool = False
+    # Whether the "¡Mucho gusto, <name>!" acknowledgment was already prepended to a
+    # question (the first one after the name was captured), so it fires only once.
+    name_acknowledged: bool = False
 
 
 def to_payload(state: ConversationState) -> dict[str, Any]:
@@ -98,6 +101,7 @@ def to_payload(state: ConversationState) -> dict[str, Any]:
         "lead_id": state.lead_id,
         "contact_id": state.contact_id,
         "greeted": state.greeted,
+        "name_acknowledged": state.name_acknowledged,
     }
 
 
@@ -121,6 +125,7 @@ def from_payload(data: dict[str, Any]) -> ConversationState:
         lead_id=data.get("lead_id"),
         contact_id=data.get("contact_id"),
         greeted=data.get("greeted", False),
+        name_acknowledged=data.get("name_acknowledged", False),
     )
 
 

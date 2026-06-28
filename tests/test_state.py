@@ -34,6 +34,7 @@ def test_serialization_round_trips() -> None:
         lead_id=9364406,
         contact_id=552211,
         greeted=True,
+        name_acknowledged=True,
     )
 
     restored = from_payload(to_payload(state))
@@ -77,6 +78,7 @@ def test_from_payload_tolerates_legacy_payload_missing_late_fields() -> None:
     assert state.inactivity_deadline is None  # inactivity-timer field absent too
     assert state.lead_id is None  # handoff idempotency marker absent in legacy
     assert state.greeted is False  # greeting flag absent in legacy payloads
+    assert state.name_acknowledged is False  # name-ack flag absent in legacy
     assert state.contact_id is None
 
 

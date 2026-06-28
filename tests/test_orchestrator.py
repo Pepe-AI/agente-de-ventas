@@ -23,7 +23,7 @@ from app.crm.kommo_chats import KommoChatsError
 from app.crm.kommo_crm import KommoCrmError
 from app.domain.handoff_orchestration import HandoffResult
 from app.domain.models import HandoffReason, IncomingMessage, Referral
-from app.domain.orchestrator import FAREWELL, handle_message
+from app.domain.orchestrator import handle_message
 from app.domain.state import ConversationState, Phase
 from app.routing.campaign import RoutingConfig
 from app.understanding.schemas import (
@@ -40,6 +40,8 @@ SENDER = "whatsapp:+5215512345678"
 _CORPUS = "CORPUS DE PRUEBA TOPVIAJES"
 _ROUTING = RoutingConfig(prefill_crucero=None, prefill_europa=None, prefill_asia=None)
 _INACTIVITY_DEADLINE_S = 7200.0  # production default; these tests don't exercise it
+# The completa farewell is now personalized; these tests seed the name "Ana".
+FAREWELL = orch._farewell_for(HandoffReason.COMPLETE, "Ana")
 
 # State now lives in a StateStore (not Redis). Each test's redis gets its own
 # in-memory store, so the existing `_seed`/`_handle` call sites stay unchanged.
@@ -187,6 +189,7 @@ async def _seed(
     pending: set[str] | None = None,
     last_bot_message: str | None = None,
     chat_id: str | None = None,
+    name_acknowledged: bool = True,  # seeded convos already passed the name greeting
 ) -> None:
     state = ConversationState(
         trip_type=trip,
@@ -198,6 +201,7 @@ async def _seed(
         pending=pending if pending is not None else set(),
         last_bot_message=last_bot_message,
         chat_id=chat_id,
+        name_acknowledged=name_acknowledged,
     )
     await _store_for(redis).save(SENDER, state)
 
@@ -253,9 +257,11 @@ async def test_happy_path_asks_every_slot_in_order_then_hands_off() -> None:
 
     # Every askable slot (requireds + optionals) was asked in flow order...
     assert replies[:-1] == [s.prompt for s in askable]
-    # ...including the cruise experience optional, then a goodbye.
+    # ...including the cruise experience optional, then a goodbye (named farewell).
     assert _prompt_of(TripType.CRUISE, "experiencia_crucero") in replies
-    assert replies[-1] == FAREWELL
+    assert replies[-1] == orch._farewell_for(
+        HandoffReason.COMPLETE, "valor-nombre_cliente"
+    )
     assert await is_handed_off(redis, SENDER)
     # The CRM handoff ran once, carrying the captured slots (incl. optionals).
     assert len(runner.calls) == 1
@@ -1249,3 +1255,72 @@ def test_is_chat_already_linked_detects_only_that_400() -> None:
         KommoCrmError("x"),
     ]
     assert all(orch._is_chat_already_linked(e) is False for e in cases)
+
+
+# --- name acknowledgment + personalized completa farewell -------------------
+
+
+async def test_name_acknowledged_on_first_question_after_capture() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    # Mid-flow: the name was asked, not yet captured/acknowledged.
+    await _seed(
+        redis, TripType.CRUISE, {}, last_asked="nombre_cliente",
+        name_acknowledged=False,
+    )
+    llm = ScriptedLLM({"nombre_cliente": "Ana"})  # captures the name this turn
+
+    reply = await _handle(_msg("soy Ana"), llm, redis)
+
+    expected = f"¡Mucho gusto, Ana! 😊 {_prompt_of(TripType.CRUISE, 'ruta_crucero')}"
+    assert reply == expected
+    assert (await _load(redis)).name_acknowledged is True
+
+
+async def test_name_acknowledgment_fires_once_not_on_retry() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    await _seed(
+        redis, TripType.CRUISE, {}, last_asked="nombre_cliente",
+        name_acknowledged=False,
+    )
+    # Turn 1: capture the name -> ruta question WITH the acknowledgment.
+    first = await _handle(_msg("Ana"), ScriptedLLM({"nombre_cliente": "Ana"}), redis)
+    assert first.startswith("¡Mucho gusto, Ana! 😊 ")
+    # Turn 2: ruta not understood -> re-ask WITHOUT repeating the acknowledgment.
+    second = await _handle(_msg("no sé"), ScriptedLLM({}), redis)
+    assert "Mucho gusto" not in second
+
+
+async def test_all_slots_at_once_farewell_carries_name_without_ack() -> None:
+    redis = FakeAsyncRedis(decode_responses=True)
+    # Optionals already asked; the name not yet captured/acknowledged.
+    await _seed(
+        redis, TripType.CRUISE, {},
+        asked=_askable_optionals(TripType.CRUISE),
+        name_acknowledged=False,
+    )
+    runner = _FakeHandoffRunner()
+    # The customer volunteers ALL required (incl. the name) in one turn -> handoff,
+    # so there is no question to acknowledge on -> the farewell carries the name.
+    llm = ScriptedLLM(dict(_REQUIRED_ALL))
+
+    reply = await _handle(_msg("todo de una"), llm, redis, runner)
+
+    assert reply == orch._farewell_for(HandoffReason.COMPLETE, "Ana")
+    assert "¡Muchas gracias, Ana!" in reply
+    assert runner.calls and runner.calls[0]["reason"] is HandoffReason.COMPLETE
+
+
+def test_farewell_for_personalizes_only_completa() -> None:
+    named = orch._farewell_for(HandoffReason.COMPLETE, "Ana")
+    assert named.startswith("¡Muchas gracias, Ana! 😊")
+    plain = orch._farewell_for(HandoffReason.COMPLETE, None)
+    assert plain.startswith("¡Muchas gracias! 😊")
+    assert "Ana" not in plain
+    assert orch._farewell_for(HandoffReason.COMPLETE, "  ") == plain  # blank->fallback
+    # atorado / pidió_humano keep their fixed text (no name).
+    assert orch._farewell_for(HandoffReason.STUCK, "Ana") == (
+        orch._FAREWELL_BY_REASON[HandoffReason.STUCK]
+    )
+    assert orch._farewell_for(HandoffReason.HUMAN_REQUESTED, "Ana") == (
+        orch._FAREWELL_BY_REASON[HandoffReason.HUMAN_REQUESTED]
+    )
