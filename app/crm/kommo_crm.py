@@ -176,6 +176,26 @@ class KommoCrmClient:
         result = await self._request("POST", _LEADS_COMPLEX_PATH, json=payload)
         return _first_lead_and_contact(result)
 
+    async def create_lead_for_contact(
+        self, lead_name: str, contact_id: int
+    ) -> KommoCreatedLead:
+        """Create a bare lead linked to an EXISTING contact; return both ids.
+
+        Mirrors ``create_lead_with_contact`` but links the contact by ``id`` (so Kommo
+        REUSES it, never duplicates) — so it sets NO contact fields and resolves no
+        phone field. Like the sibling it OMITS ``pipeline_id``: the lead lands in the
+        default stage and the handoff's ``update_lead`` moves it; the lead's own custom
+        fields are written there too. ``contact_id`` comes from a prior phone search.
+        """
+        payload = [
+            {
+                "name": lead_name,
+                "_embedded": {"contacts": [{"id": contact_id}]},
+            }
+        ]
+        result = await self._request("POST", _LEADS_COMPLEX_PATH, json=payload)
+        return _first_lead_and_contact(result)
+
     async def get_lead(self, lead_id: int) -> dict[str, object]:
         """GET a single lead by id; its ``status_id``/``pipeline_id`` tell its stage.
 

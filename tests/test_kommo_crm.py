@@ -414,3 +414,27 @@ async def test_web_app_boot_fails_fast_without_kommo_long_lived_token(
     with pytest.raises(RuntimeError, match="KOMMO_LONG_LIVED_TOKEN"):
         async with main_module.lifespan(main_module.app):
             pass
+
+
+async def test_create_lead_for_contact_links_existing_contact_by_id() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200, json=[{"id": 900, "contact_id": 55, "merged": False}]
+        )
+
+    async with _client(handler) as client:
+        result = await client.create_lead_for_contact("Lead X", 55)
+
+    assert result.lead_id == 900
+    assert result.contact_id == 55
+    # The contact already exists -> no phone-field lookup, no contact fields sent.
+    assert all(r.url.path != "/api/v4/contacts/custom_fields" for r in requests)
+    complex_req = next(r for r in requests if r.url.path == "/api/v4/leads/complex")
+    assert complex_req.method == "POST"
+    # Bare lead (no pipeline_id, mirrors create_lead_with_contact) linking contact 55.
+    assert json.loads(complex_req.content) == [
+        {"name": "Lead X", "_embedded": {"contacts": [{"id": 55}]}}
+    ]

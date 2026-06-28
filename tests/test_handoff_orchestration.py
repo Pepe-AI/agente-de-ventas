@@ -270,3 +270,92 @@ async def test_update_failure_propagates() -> None:
             slots=_SLOTS,
             pending=(),
         )
+
+
+# --- Fix B (i): reuse an existing contact that has no leads ------------------
+
+
+async def test_existing_contact_without_leads_creates_lead_on_it() -> None:
+    client = AsyncMock()
+    client.find_contact_by_phone.return_value = [KommoContactMatch(55, ())]  # no leads
+    client.create_lead_for_contact.return_value = KommoCreatedLead(900, 55)
+
+    result = await _runner(client).run(
+        reason=HandoffReason.COMPLETE, phone="+1", customer_name="Ana",
+        slots=_SLOTS, pending=(),
+    )
+
+    client.create_lead_for_contact.assert_awaited_once_with("Ana", 55)
+    client.create_lead_with_contact.assert_not_awaited()  # did NOT create a new contact
+    assert result.contact_id == 55  # reused the existing contact
+    assert result.lead_id == 900
+    client.get_lead.assert_not_awaited()  # is_new=True -> no stage read
+
+
+async def test_lead_on_existing_contact_moves_to_reason_stage() -> None:
+    # Omitting pipeline_id at creation: the bare lead is moved to the reason's stage
+    # by update_lead (is_new=True -> _should_move_stage True), not left in default.
+    client = AsyncMock()
+    client.find_contact_by_phone.return_value = [KommoContactMatch(55, ())]
+    client.create_lead_for_contact.return_value = KommoCreatedLead(900, 55)
+
+    await _runner(client).run(
+        reason=HandoffReason.COMPLETE, phone="+1", customer_name="Ana",
+        slots=_SLOTS, pending=(),
+    )
+
+    client.create_lead_for_contact.assert_awaited_once_with("Ana", 55)  # the new path
+    client.get_lead.assert_not_awaited()  # new lead: no stage read
+    _, kwargs = client.update_lead.await_args
+    assert kwargs["status_id"] == 555  # COMPLETE -> Calificado (the reason's stage)
+    assert kwargs["pipeline_id"] == 900  # moved into the pipeline, not left in default
+    assert kwargs["custom_fields_values"]  # lead fields still written
+
+
+async def test_existing_contact_with_leads_reuses_lead_not_creates() -> None:
+    client = AsyncMock()
+    client.find_contact_by_phone.return_value = [KommoContactMatch(11, (5, 8))]
+    client.get_lead.return_value = {"id": 8, "status_id": 555}
+
+    result = await _runner(client).run(
+        reason=HandoffReason.COMPLETE, phone="+1", customer_name="X",
+        slots=_SLOTS, pending=(),
+    )
+
+    assert result.lead_id == 8  # max(lead_id), reused [unchanged behavior]
+    assert result.contact_id == 11
+    client.create_lead_for_contact.assert_not_awaited()  # new branch NOT taken
+    client.create_lead_with_contact.assert_not_awaited()
+
+
+async def test_no_contact_creates_new_lead_and_contact() -> None:
+    client = AsyncMock()
+    client.find_contact_by_phone.return_value = []
+    client.create_lead_with_contact.return_value = KommoCreatedLead(900, 800)
+
+    result = await _runner(client).run(
+        reason=HandoffReason.COMPLETE, phone="+1", customer_name="Ana",
+        slots=_SLOTS, pending=(),
+    )
+
+    client.create_lead_with_contact.assert_awaited_once_with("Ana", "Ana", "+1")
+    client.create_lead_for_contact.assert_not_awaited()  # no contact -> not this branch
+    assert result.contact_id == 800
+
+
+async def test_multiple_contacts_without_leads_picks_highest_contact_id() -> None:
+    client = AsyncMock()
+    client.find_contact_by_phone.return_value = [
+        KommoContactMatch(22, ()),
+        KommoContactMatch(77, ()),  # highest contact_id -> chosen
+        KommoContactMatch(40, ()),
+    ]
+    client.create_lead_for_contact.return_value = KommoCreatedLead(900, 77)
+
+    result = await _runner(client).run(
+        reason=HandoffReason.COMPLETE, phone="+1", customer_name="X",
+        slots=_SLOTS, pending=(),
+    )
+
+    client.create_lead_for_contact.assert_awaited_once_with("X", 77)  # max(contact_id)
+    assert result.contact_id == 77
