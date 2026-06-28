@@ -160,6 +160,11 @@ def _prompt_of(trip: TripType, slot_name: str) -> str:
     return slot.prompt
 
 
+def _greeted(trip: TripType, message: str) -> str:
+    """First-turn reply shape: the trip-aware opening greeting + ``message``."""
+    return f"{orch._GREETING_BY_TRIP[trip]}\n\n{message}"
+
+
 def _askable_optionals(trip: TripType) -> set[str]:
     return {s.name for s in descriptor_for(trip).slots if s.askable and not s.required}
 
@@ -668,11 +673,14 @@ async def test_first_message_prefill_routes_and_asks_first_question(
 
     reply = await _route_turn(redis, "Vi su anuncio del Mediterráneo Mágico", routing)
 
-    # Routed to cruise and emitted the first schema question; no understanding.
-    assert reply == _prompt_of(TripType.CRUISE, "nombre_cliente")
+    # Routed to cruise: greeting (trip-aware) + first schema question; no understanding.
+    assert reply == _greeted(
+        TripType.CRUISE, _prompt_of(TripType.CRUISE, "nombre_cliente")
+    )
     understand_spy.assert_not_awaited()
     state = await _load(redis)
     assert state.trip_type is TripType.CRUISE
+    assert state.greeted is True
     assert state.last_bot_message == reply
 
 
@@ -692,7 +700,9 @@ async def test_first_message_referral_routes_without_text_keyword() -> None:
 
     state = await _load(redis)
     assert state.trip_type is TripType.CRUISE
-    assert reply == _prompt_of(TripType.CRUISE, "nombre_cliente")
+    assert reply == _greeted(
+        TripType.CRUISE, _prompt_of(TripType.CRUISE, "nombre_cliente")
+    )
 
 
 async def test_indeterminate_first_message_asks_disambiguation() -> None:
@@ -745,15 +755,30 @@ async def test_handoff_crm_failure_does_not_flip_and_propagates() -> None:
 
 async def test_disambiguation_reply_routes_and_starts_flow() -> None:
     redis = FakeAsyncRedis(decode_responses=True)
-    # Turn 1: indeterminate -> disambiguation.
-    await _route_turn(redis, "hola")
+    # Turn 1: indeterminate -> disambiguation (which greets).
+    first = await _route_turn(redis, "hola")
+    assert first == orch._DISAMBIGUATION_QUESTION
 
-    # Turn 2: the user clarifies; still trip_type=None so routing runs again.
+    # Turn 2: the user clarifies; routing runs again and starts the flow WITHOUT
+    # greeting again (the disambiguation already greeted -> no double greeting).
     reply = await _route_turn(redis, "sería un crucero")
 
     state = await _load(redis)
     assert state.trip_type is TripType.CRUISE
-    assert reply == _prompt_of(TripType.CRUISE, "nombre_cliente")
+    assert reply == _prompt_of(TripType.CRUISE, "nombre_cliente")  # bare, no greeting
+    assert orch._GREETING_BY_TRIP[TripType.CRUISE] not in reply
+    assert state.greeted is True
+
+
+async def test_opening_greeting_names_the_trip_type() -> None:
+    # The greeting recognizes the destination resolved by the campaign/keyword.
+    for text, trip in (
+        ("quiero un viaje a Europa", TripType.EUROPE),
+        ("quiero ir a Asia", TripType.ASIA),
+    ):
+        redis = FakeAsyncRedis(decode_responses=True)
+        reply = await _route_turn(redis, text, _ROUTING)
+        assert reply == _greeted(trip, _prompt_of(trip, "nombre_cliente"))
 
 
 async def test_unclear_disambiguation_reply_reasks() -> None:

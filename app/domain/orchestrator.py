@@ -73,10 +73,30 @@ _FAREWELL_BY_REASON: dict[HandoffReason, str] = {
     HandoffReason.HUMAN_REQUESTED: _FAREWELL_HUMAN,
 }
 
+# One-time opening greeting, prepended to the first slot question once the campaign
+# has resolved the trip type. Trip-aware so it names the destination; the only place
+# an emoji appears (slot prompts carry none).
+_GREETING_BY_TRIP: dict[TripType, str] = {
+    TripType.CRUISE: (
+        "¡Hola! 😊 Bienvenido(a) a TOPVIAJES. Con mucho gusto le ayudamos a "
+        "planear su crucero."
+    ),
+    TripType.EUROPE: (
+        "¡Hola! 😊 Bienvenido(a) a TOPVIAJES. Con mucho gusto le ayudamos a "
+        "planear su viaje por Europa."
+    ),
+    TripType.ASIA: (
+        "¡Hola! 😊 Bienvenido(a) a TOPVIAJES. Con mucho gusto le ayudamos a "
+        "planear su viaje por Asia."
+    ),
+}
+
 # Disambiguation question asked when the trip type cannot be inferred (adjustable).
+# It opens with its own greeting (it is the customer's first message when there is
+# no campaign placeholder), so it also counts as "greeted".
 _DISAMBIGUATION_QUESTION = (
-    "¡Hola! Para ayudarte mejor, ¿tu viaje sería un crucero, un viaje a Europa "
-    "o un viaje a Asia?"
+    "¡Hola! 😊 Para ayudarle mejor, ¿su viaje sería un crucero, un viaje por "
+    "Europa o un viaje por Asia?"
 )
 
 # Re-ask wording escalates so a retry never repeats the question literally.
@@ -187,6 +207,9 @@ async def _route(
     """
     trip_type = classify_trip_type(msg.text, msg.referral, routing)
     if trip_type is None:
+        # The disambiguation greets ("¡Hola!..."), so the customer is now greeted:
+        # the first slot question (after they pick a type) must NOT greet again.
+        state.greeted = True
         return await _send(
             store, msg, state, _DISAMBIGUATION_QUESTION, inactivity_deadline_s
         )
@@ -204,8 +227,13 @@ async def _route(
 
     state.asked.add(nxt.name)
     state.last_asked = nxt.name
+    # Prepend the trip-aware greeting on the first slot question — but only if the
+    # customer was not already greeted (a prior disambiguation turn). One greeting.
+    greeting = "" if state.greeted else f"{_GREETING_BY_TRIP[trip_type]}\n\n"
+    state.greeted = True
     return await _send(
-        store, msg, state, _ask_prompt(nxt, state.attempts), inactivity_deadline_s
+        store, msg, state, f"{greeting}{_ask_prompt(nxt, state.attempts)}",
+        inactivity_deadline_s,
     )
 
 

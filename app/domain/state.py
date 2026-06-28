@@ -72,6 +72,9 @@ class ConversationState:
     # contact. ``None`` until the first run succeeds.
     lead_id: int | None = None
     contact_id: int | None = None
+    # Whether the customer already received an opening message (the trip-aware
+    # greeting OR the disambiguation question), so the greeting is never repeated.
+    greeted: bool = False
 
 
 def to_payload(state: ConversationState) -> dict[str, Any]:
@@ -94,6 +97,7 @@ def to_payload(state: ConversationState) -> dict[str, Any]:
         "inactivity_deadline": state.inactivity_deadline,
         "lead_id": state.lead_id,
         "contact_id": state.contact_id,
+        "greeted": state.greeted,
     }
 
 
@@ -116,6 +120,7 @@ def from_payload(data: dict[str, Any]) -> ConversationState:
         inactivity_deadline=data.get("inactivity_deadline"),
         lead_id=data.get("lead_id"),
         contact_id=data.get("contact_id"),
+        greeted=data.get("greeted", False),
     )
 
 

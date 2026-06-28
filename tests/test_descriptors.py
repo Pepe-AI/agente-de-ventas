@@ -131,3 +131,19 @@ def test_extraction_model_uses_nested_models_for_special_slots() -> None:
     }
     # Slots the model could not fill stay null (never invented).
     assert dumped["nombre_cliente"] is None
+
+
+def test_slot_prompts_use_formal_usted_register() -> None:
+    # Spot-check the tone change (tú -> usted) across the three trip types.
+    cruise = {s.name: s.prompt for s in descriptor_for(TripType.CRUISE).slots}
+    assert cruise["nombre_cliente"] == "Para empezar, ¿me podría compartir su nombre?"
+    assert "su presupuesto" in cruise["presupuesto_crucero"]
+    assert cruise["pasaporte_crucero"] == "¿Cuenta con pasaporte vigente?"
+
+    europe = {s.name: s.prompt for s in descriptor_for(TripType.EUROPE).slots}
+    assert "le gustaría visitar" in europe["paises_europa"]
+    assert europe["vuelos_europa"] == "¿Desea que incluyamos los vuelos?"
+
+    asia = {s.name: s.prompt for s in descriptor_for(TripType.ASIA).slots}
+    assert asia["nombre_cliente"] == "Para empezar, ¿me podría compartir su nombre?"
+    assert "su presupuesto" in asia["presupuesto_asia"]

@@ -91,52 +91,52 @@ _CRUISE = TripSchema(
     slots=(
         SlotSpec(
             "nombre_cliente", str, True,
-            "Para empezar, ¿me compartes tu nombre completo?",
+            "Para empezar, ¿me podría compartir su nombre?",
         ),
         SlotSpec(
             "ruta_crucero", str, True,
-            "¿Qué ruta o destino de crucero te interesa?",
+            "¿Qué ruta o destino de crucero le interesa?",
             rule=SlotRule.DESTINATION,  # cruise has no experience escape
         ),
         SlotSpec(
             "fechas_crucero", str, True,
-            "¿En qué fechas te gustaría viajar?",
+            "¿En qué fechas le gustaría viajar?",
         ),
         SlotSpec(
             "pasajeros_crucero", Passengers, True,
             "¿Cuántas personas viajan? Si viajan menores de 15 años, "
-            "indícame sus edades.",
+            "por favor indíqueme sus edades.",
             rule=SlotRule.PASSENGERS,
         ),
         SlotSpec(
             "cabinas_crucero", str, False,
-            "¿Cuántas cabinas necesitas?",
+            "¿Cuántas cabinas necesita?",
         ),
         SlotSpec(
             "tipo_cabina", str, False,
-            "¿Qué tipo de cabina prefieres (interior, exterior, balcón o suite)?",
+            "¿Qué tipo de cabina prefiere (interior, exterior, balcón o suite)?",
         ),
         SlotSpec(
             "experiencia_crucero", str, False,
-            "¿Qué tipo de experiencia a bordo buscas?",
+            "¿Qué tipo de experiencia a bordo busca?",
         ),
         SlotSpec(
             "servicios_crucero", str, False,
-            "¿Te interesa contratar algún servicio adicional?",
+            "¿Le interesa contratar algún servicio adicional?",
         ),
         SlotSpec(
             "ciudad_salida_crucero", str, False,
-            "¿Desde qué ciudad te gustaría salir?",
+            "¿Desde qué ciudad le gustaría salir?",
         ),
         SlotSpec(
             "presupuesto_crucero", Budget, True,
-            "¿Cuál es tu presupuesto aproximado? Si lo prefieres, podemos "
-            "revisarlo con un asesor.",
+            "¿Cuál es su presupuesto aproximado? Si lo prefiere, con gusto lo "
+            "revisamos junto con un asesor.",
             rule=SlotRule.BUDGET,
         ),
         SlotSpec(
             "pasaporte_crucero", str, False,
-            "¿Cuentas con pasaporte vigente?",
+            "¿Cuenta con pasaporte vigente?",
         ),
     ),
 )
@@ -154,26 +154,26 @@ def _continent_schema(
         slots=(
             SlotSpec(
                 "nombre_cliente", str, True,
-                "Para empezar, ¿me compartes tu nombre completo?",
+                "Para empezar, ¿me podría compartir su nombre?",
             ),
             SlotSpec(
                 destino_slot, str, True,
-                f"¿Qué destinos de {continent} te gustaría visitar?",
+                f"¿Qué destinos de {continent} le gustaría visitar?",
                 rule=SlotRule.DESTINATION,
                 escape_slot=f"experiencia{suffix}",
             ),
             SlotSpec(
                 f"experiencia{suffix}", str, False,
-                "¿Qué tipo de experiencia buscas en este viaje?",
+                "¿Qué tipo de experiencia busca en este viaje?",
                 askable=False,  # passive: captured from the destination answer
             ),
             SlotSpec(
                 f"servicios{suffix}", str, False,
-                "¿Te interesa contratar algún servicio adicional?",
+                "¿Le interesa contratar algún servicio adicional?",
             ),
             SlotSpec(
                 f"fechas{suffix}", str, True,
-                "¿En qué fechas te gustaría viajar?",
+                "¿En qué fechas le gustaría viajar?",
             ),
             SlotSpec(
                 f"duracion{suffix}", str, True,
@@ -182,20 +182,20 @@ def _continent_schema(
             SlotSpec(
                 f"pasajeros{suffix}", Passengers, True,
                 "¿Cuántas personas viajan? Si viajan menores de 15 años, "
-                "indícame sus edades.",
+                "por favor indíqueme sus edades.",
                 rule=SlotRule.PASSENGERS,
             ),
             SlotSpec(
                 f"ciudad_salida{suffix}", str, False,
-                "¿Desde qué ciudad te gustaría salir?",
+                "¿Desde qué ciudad le gustaría salir?",
             ),
             SlotSpec(
                 f"nivel_hospedaje{suffix}", str, False,
-                "¿Qué nivel de hospedaje prefieres?",
+                "¿Qué nivel de hospedaje prefiere?",
             ),
             SlotSpec(
                 f"vuelos{suffix}", str, False,
-                "¿Quieres que incluyamos los vuelos?",
+                "¿Desea que incluyamos los vuelos?",
             ),
             SlotSpec(
                 f"ocasion{suffix}", str, False,
@@ -203,13 +203,13 @@ def _continent_schema(
             ),
             SlotSpec(
                 f"presupuesto{suffix}", Budget, True,
-                "¿Cuál es tu presupuesto aproximado? Si lo prefieres, podemos "
-                "revisarlo con un asesor.",
+                "¿Cuál es su presupuesto aproximado? Si lo prefiere, con gusto lo "
+                "revisamos junto con un asesor.",
                 rule=SlotRule.BUDGET,
             ),
             SlotSpec(
                 f"pasaporte{suffix}", str, False,
-                "¿Cuentas con pasaporte vigente?",
+                "¿Cuenta con pasaporte vigente?",
             ),
         ),
     )
