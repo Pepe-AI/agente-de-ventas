@@ -31,8 +31,9 @@ def _passengers_satisfied(value: object) -> bool:
     passengers = Passengers.model_validate(value)
     if passengers.adults is None:
         return False
-    # Minors mentioned but no ages yet: keep asking for the ages.
-    return not (passengers.minors_mentioned and not passengers.minor_ages)
+    # Minor ages are optional: a mention of minors is enough, we never block on
+    # missing ages. adults (above) is the only required field.
+    return True
 
 
 def is_satisfied(slot: SlotSpec, slots: dict[str, object]) -> bool:

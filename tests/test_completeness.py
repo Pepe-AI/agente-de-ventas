@@ -91,9 +91,9 @@ def test_passengers_unsatisfied_without_adults() -> None:
     assert not is_satisfied(_PASSENGERS, {"pasajeros": {"adults": None}})
 
 
-def test_passengers_unsatisfied_when_minors_mentioned_without_ages() -> None:
+def test_passengers_satisfied_when_minors_mentioned_without_ages() -> None:
     state = {"pasajeros": {"adults": 2, "minors_mentioned": True, "minor_ages": None}}
-    assert not is_satisfied(_PASSENGERS, state)
+    assert is_satisfied(_PASSENGERS, state)
 
 
 def test_passengers_satisfied_when_minor_ages_present() -> None:

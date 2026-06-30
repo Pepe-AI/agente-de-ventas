@@ -376,10 +376,10 @@ async def test_vague_destination_satisfied_by_experience() -> None:
     assert reply == _prompt_of(TripType.EUROPE, "fechas_europa")
 
 
-# --- Minors need ages -------------------------------------------------------
+# --- Minors: ages are optional ----------------------------------------------
 
 
-async def test_minors_without_ages_keeps_asking_then_satisfied() -> None:
+async def test_minors_without_ages_satisfies_passengers_and_advances() -> None:
     redis = FakeAsyncRedis(decode_responses=True)
     await _seed(
         redis,
@@ -393,17 +393,12 @@ async def test_minors_without_ages_keeps_asking_then_satisfied() -> None:
     )
     llm = ScriptedLLM(
         {"pasajeros_crucero": Passengers(adults=2, minors_mentioned=True)},
-        {"pasajeros_crucero": Passengers(minor_ages=[8])},
     )
 
-    # Turn 1: minors mentioned but no ages -> keep asking passengers.
-    reply1 = await _handle(_msg("somos 2 y un niño"), llm, redis)
-    assert reply1 == _prompt_of(TripType.CRUISE, "pasajeros_crucero")
-
-    # Turn 2: ages given; merge keeps adults=2 -> satisfied -> advance to the
-    # next askable slot (the first optional).
-    reply2 = await _handle(_msg("tiene 8 años"), llm, redis)
-    assert reply2 == _prompt_of(TripType.CRUISE, "cabinas_crucero")
+    # Minors mentioned but no ages: adults present satisfies passengers (ages are
+    # optional), so the bot advances straight to the next askable slot.
+    reply = await _handle(_msg("somos 2 y un niño"), llm, redis)
+    assert reply == _prompt_of(TripType.CRUISE, "cabinas_crucero")
 
 
 # --- Terse answer resolved via context -------------------------------------
