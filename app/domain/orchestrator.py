@@ -185,7 +185,38 @@ async def handle_message(
             chat_connector,
         )
 
+    # TEMP DIAG - remove after capture: observe the failed-attempt gate per turn.
+    _diag_slot = next(
+        (s for s in descriptor.slots if s.name == state.last_asked), None
+    )
+    _diag_attempts_before = dict(state.attempts)
     _count_failed_attempt(descriptor, state, understanding)
+    _diag_lower = msg.text.lower()
+    _diag_opt_out = any(
+        p in _diag_lower
+        for p in (
+            "prefiero revisarlo", "con asesor", "no sé", "no se",
+            "recomién", "recomien", "no lo sé", "el que sea",
+        )
+    )
+    log.info(
+        "DIAG_atorado",
+        sender=msg.sender,
+        last_asked=state.last_asked,
+        filled=understanding.filled,
+        question=understanding.question,
+        is_satisfied=(
+            is_satisfied(_diag_slot, state.slots)
+            if _diag_slot is not None
+            else None
+        ),
+        attempts_before=_diag_attempts_before,
+        attempts_after=dict(state.attempts),
+        pending=sorted(state.pending),
+        opt_out_detected=_diag_opt_out,
+        raw_text=msg.text,
+    )
+    # END TEMP DIAG
 
     # The flow continuation: the next slot to ask, or the handoff farewell.
     nxt = next_slot_to_ask(descriptor, state.slots, state.asked, state.pending)
