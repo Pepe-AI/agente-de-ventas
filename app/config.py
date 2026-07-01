@@ -80,6 +80,10 @@ class Settings(BaseSettings):
 
     # Concurrency tunables (seconds / counts) with sensible defaults.
     debounce_window_s: float = 3.0
+    # Hard ceiling on how long one burst is buffered. The flush fires at
+    # min(last_message + debounce_window_s, first_message + max_buffer_wait_s), so
+    # a nonstop typer is still processed at the cap. Anchored to the first message.
+    max_buffer_wait_s: float = 12.0
     dedup_ttl_s: int = 3600
     lock_ttl_s: int = 30
     rate_window_s: int = 10

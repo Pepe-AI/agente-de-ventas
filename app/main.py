@@ -24,7 +24,7 @@ from twilio.rest import Client
 from app.answering.corpus import load_corpus
 from app.channels.base import Channel
 from app.channels.twilio import InvalidPayloadError, TwilioChannel
-from app.concurrency import buffer, debounce, dedup, handoff, rate_limit
+from app.concurrency import buffer, dedup, handoff, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.concurrency.flush import schedule_flush
 from app.concurrency.inactivity import sweep_once
@@ -386,8 +386,7 @@ async def whatsapp_webhook(
         log.warning("buffer_overflow_blocked", sender=sender, size=size)
         return _ack()
 
-    # 5. Register debounce token and schedule the background flush.
-    await debounce.set_token(redis, sender, msg.message_id)
+    # 5. (Re)arm the per-sender debounce timer; it flushes the buffer when it fires.
     schedule_flush(
         redis, channel, llm, store, routing, corpus, handoff_runner,
         chat_connector, sender, msg.message_id, config,

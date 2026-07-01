@@ -21,6 +21,7 @@ class ConcurrencyConfig:
     """
 
     debounce_window_s: float
+    max_buffer_wait_s: float
     dedup_ttl_s: int
     lock_ttl_s: int
     rate_window_s: int
@@ -34,6 +35,7 @@ class ConcurrencyConfig:
         """Build the config from application settings."""
         return cls(
             debounce_window_s=settings.debounce_window_s,
+            max_buffer_wait_s=settings.max_buffer_wait_s,
             dedup_ttl_s=settings.dedup_ttl_s,
             lock_ttl_s=settings.lock_ttl_s,
             rate_window_s=settings.rate_window_s,

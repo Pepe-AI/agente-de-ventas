@@ -37,6 +37,7 @@ VALID_FORM = {"From": SENDER, "Body": "hola", "MessageSid": "SM123"}
 
 TEST_CONFIG = ConcurrencyConfig(
     debounce_window_s=60.0,
+    max_buffer_wait_s=120.0,
     dedup_ttl_s=3600,
     lock_ttl_s=30,
     rate_window_s=10,

@@ -43,6 +43,7 @@ VALID_FORM = {
 
 TEST_CONFIG = ConcurrencyConfig(
     debounce_window_s=60.0,  # long window so the background flush never fires in-test
+    max_buffer_wait_s=120.0,  # cap also long: neither timer fires during these tests
     dedup_ttl_s=3600,
     lock_ttl_s=30,
     rate_window_s=10,

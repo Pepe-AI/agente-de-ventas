@@ -13,7 +13,7 @@ import structlog
 from redis.asyncio import Redis
 
 from app.channels.base import Channel
-from app.concurrency import buffer, debounce, lock, rate_limit
+from app.concurrency import buffer, lock, rate_limit
 from app.concurrency.config import ConcurrencyConfig
 from app.domain.chat_connection import ChatConnector
 from app.domain.handoff_orchestration import HandoffRunner
@@ -39,6 +39,22 @@ _GENERIC_APOLOGY = (
 
 # Keep strong references so background tasks are not garbage-collected mid-flight.
 _background_tasks: set[asyncio.Task[None]] = set()
+# Real per-sender debounce, in memory only (NOT persisted in Redis): the single
+# pending flush timer per sender, and the burst's cap anchor (the loop time of the
+# burst's first message). Losing these on a redeploy is benign -- a burst is then
+# flushed a little early, never duplicated nor dropped.
+_pending_flushes: dict[str, asyncio.Task[None]] = {}
+_burst_anchors: dict[str, float] = {}
+
+
+def _now() -> float:
+    """Monotonic clock (event-loop time); a seam so tests can drive the timer."""
+    return asyncio.get_running_loop().time()
+
+
+async def _sleep(delay: float) -> None:
+    """Indirection over ``asyncio.sleep`` so tests can drive the debounce."""
+    await asyncio.sleep(delay)
 
 
 def schedule_flush(
@@ -54,18 +70,35 @@ def schedule_flush(
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
-    """Schedule a flush for ``sender`` after the debounce window (non-blocking)."""
+    """(Re)arm the sender's single debounce timer (non-blocking).
+
+    A real debounce: each message cancels the pending timer and reschedules it to
+    fire at ``min(now + debounce_window_s, anchor + max_buffer_wait_s)`` -- the
+    debounce, capped so a nonstop typer is still flushed at ``anchor + cap``. The
+    cap anchor (first message of the burst) is set on the first message and kept
+    until the flush fires.
+    """
+    now = _now()
+    anchor = _burst_anchors.setdefault(sender, now)
+    cap_remaining = anchor + config.max_buffer_wait_s - now
+    delay = max(0.0, min(config.debounce_window_s, cap_remaining))
+
+    existing = _pending_flushes.get(sender)
+    if existing is not None:
+        existing.cancel()  # supersede the pending timer; it aborts in _sleep
+
     task = asyncio.create_task(
-        _flush_after_window(
+        _debounced_flush(
             redis, channel, llm, store, routing, corpus, handoff_runner,
-            chat_connector, sender, token, config,
+            chat_connector, sender, token, config, delay,
         )
     )
+    _pending_flushes[sender] = task
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
 
-async def _flush_after_window(
+async def _debounced_flush(
     redis: Redis,
     channel: Channel,
     llm: LLM,
@@ -77,8 +110,18 @@ async def _flush_after_window(
     sender: str,
     token: str,
     config: ConcurrencyConfig,
+    delay: float,
 ) -> None:
-    await asyncio.sleep(config.debounce_window_s)
+    try:
+        await _sleep(delay)
+    except asyncio.CancelledError:
+        raise  # a newer message rescheduled us; that timer now owns the burst
+    # Committed to firing: drop the burst tracking BEFORE any further await, so a
+    # message arriving during processing starts a fresh burst and cannot cancel us
+    # (CancelledError can only ever land in the _sleep above, never inside flush).
+    _burst_anchors.pop(sender, None)
+    if _pending_flushes.get(sender) is asyncio.current_task():
+        del _pending_flushes[sender]
     await flush(
         redis, channel, llm, store, routing, corpus, handoff_runner,
         chat_connector, sender, token, config,
@@ -98,10 +141,7 @@ async def flush(
     token: str,
     config: ConcurrencyConfig,
 ) -> None:
-    """Process a sender's buffered messages once, if this flush is the winner."""
-    if not await debounce.is_latest_token(redis, sender, token):
-        return  # a newer message arrived; its flush will handle the buffer
-
+    """Process a sender's buffered messages once, under the conversation lock."""
     lock_token = uuid4().hex
     if not await lock.acquire(redis, sender, lock_token, config.lock_ttl_s):
         return  # another flush is already processing this sender
